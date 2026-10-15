@@ -9,11 +9,12 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "com.jake.cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.2.0";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
         private NetSession _session;
+        private PlayerSync _playerSync;
 
         private void Awake()
         {
@@ -26,6 +27,7 @@ namespace CookingSimMP
                 "UDP port the host listens on and the joiner connects to.");
 
             _session = new NetSession(Logger);
+            _playerSync = new PlayerSync(_session, Logger);
             Logger.LogInfo($"{PluginName} {PluginVersion} loaded (process {NetSession.ProcessId}). " +
                            $"F10 = host on port {_port.Value}, F11 = join {_hostAddress.Value}:{_port.Value}, F12 = disconnect.");
         }
@@ -40,6 +42,8 @@ namespace CookingSimMP
                 _session.Stop();
 
             _session.Poll();
+            // Unscaled so syncing keeps running while the game is paused.
+            _playerSync.Tick(Time.unscaledDeltaTime);
         }
 
         private void OnApplicationQuit() => _session?.Stop();

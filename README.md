@@ -17,6 +17,12 @@ Only this mod's DLL and LiteNetLib.dll are ever distributed. Game files and deco
 3. Both logs (`BepInEx\LogOutput.log` and `LogOutput.log.1`) should show `Received from peer 0: "hello from ..."`.
 4. **F12** disconnects. The address and port live in `BepInEx\config\com.jake.cookingsimmp.cfg`.
 
+## Test the ghost player (milestone 2)
+
+1. Connect as above, then load into the same kitchen in both copies.
+2. Each copy should show a blue capsule with a head cube where the other player stands. The cube's "nose" points where they look, and the capsule gets shorter when they crouch.
+3. The log shows `Receiving position updates from peer 0` once updates start arriving.
+
 ## Keys
 
 | Key | Action |

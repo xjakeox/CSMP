@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -11,6 +12,7 @@ namespace CookingSimMP
     internal enum MessageType : byte
     {
         Hello = 1,
+        PlayerState = 2,
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
@@ -25,6 +27,12 @@ namespace CookingSimMP
         private readonly NetManager _net;
         private readonly NetDataWriter _writer = new NetDataWriter();
         private bool _isHost;
+
+        public event Action<int, PlayerState> PlayerStateReceived;
+        public event Action<int> PeerLeft;
+        public event Action Stopped;
+
+        public bool IsConnected => _net.IsRunning && _net.ConnectedPeersCount > 0;
 
         public NetSession(ManualLogSource log)
         {
@@ -78,12 +86,22 @@ namespace CookingSimMP
                 return;
             _net.Stop();
             _log.LogInfo("Disconnected and stopped networking.");
+            Stopped?.Invoke();
         }
 
         public void Poll()
         {
             if (_net.IsRunning)
                 _net.PollEvents();
+        }
+
+        // Sequenced: may drop packets, but never delivers an older position after a newer one.
+        public void SendPlayerState(PlayerState state)
+        {
+            _writer.Reset();
+            _writer.Put((byte)MessageType.PlayerState);
+            state.Write(_writer);
+            _net.SendToAll(_writer, DeliveryMethod.Sequenced);
         }
 
         private void OnConnectionRequest(ConnectionRequest request)
@@ -104,6 +122,7 @@ namespace CookingSimMP
         private void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
         {
             _log.LogInfo($"Peer {peer.Id} disconnected: {info.Reason}.");
+            PeerLeft?.Invoke(peer.Id);
         }
 
         private void OnNetworkReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod deliveryMethod)
@@ -113,6 +132,9 @@ namespace CookingSimMP
             {
                 case MessageType.Hello:
                     _log.LogInfo($"Received from peer {peer.Id}: \"{reader.GetString(256)}\"");
+                    break;
+                case MessageType.PlayerState:
+                    PlayerStateReceived?.Invoke(peer.Id, PlayerState.Read(reader));
                     break;
                 default:
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peer.Id}.");

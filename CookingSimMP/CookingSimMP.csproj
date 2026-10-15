@@ -28,6 +28,10 @@
 			<HintPath>$(GameDir)\CookingSim_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
+		<Reference Include="UnityEngine.PhysicsModule">
+			<HintPath>$(GameDir)\CookingSim_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
 		<Reference Include="UnityEngine.InputLegacyModule">
 			<HintPath>$(GameDir)\CookingSim_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
 			<Private>false</Private>
