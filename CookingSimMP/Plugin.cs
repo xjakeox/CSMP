@@ -9,7 +9,7 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "com.jake.cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.3.2";
+        public const string PluginVersion = "0.4.9";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
@@ -48,6 +48,8 @@ namespace CookingSimMP
             _playerSync.Tick(Time.unscaledDeltaTime);
             _itemSync.Tick(Time.unscaledDeltaTime);
         }
+
+        private void LateUpdate() => _itemSync.LateTick(Time.unscaledDeltaTime);
 
         private void OnApplicationQuit() => _session?.Stop();
 

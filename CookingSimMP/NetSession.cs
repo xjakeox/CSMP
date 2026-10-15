@@ -34,6 +34,7 @@ namespace CookingSimMP
         private readonly NetManager _net;
         private readonly NetDataWriter _writer = new NetDataWriter();
         private bool _isHost;
+        private bool _stopAfterPoll;
 
         public event Action<int, PlayerState> PlayerStateReceived;
         public event Action<int> PeerLeft;
@@ -104,6 +105,12 @@ namespace CookingSimMP
         {
             if (_net.IsRunning)
                 _net.PollEvents();
+            // Stopping from inside an event callback isn't safe, so it waits until polling is done.
+            if (_stopAfterPoll)
+            {
+                _stopAfterPoll = false;
+                Stop();
+            }
         }
 
         // Sequenced: may drop packets, but never delivers an older position after a newer one.
@@ -147,6 +154,13 @@ namespace CookingSimMP
         {
             _log.LogInfo($"Peer {peer.Id} disconnected: {info.Reason}.");
             PeerLeft?.Invoke(peer.Id);
+            // A client with no host left has nothing to do; stop so F10/F11 work again without F12.
+            if (!_isHost)
+            {
+                if (info.Reason == DisconnectReason.ConnectionFailed)
+                    _log.LogWarning("Couldn't reach the host. Is the other copy hosting (F10)? Press F11 to try again.");
+                _stopAfterPoll = true;
+            }
         }
 
         private void OnNetworkReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod deliveryMethod)

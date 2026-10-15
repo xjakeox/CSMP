@@ -25,14 +25,14 @@ Only this mod's DLL and LiteNetLib.dll are ever distributed. Game files and deco
 
 ## Test held-object sync (milestone 3)
 
-Only containers (plates, bowls, pots, pans) sync so far, and only while someone holds one.
+Everything you can pick up syncs while someone holds it: containers, loose food, knives and other tools, oil bottles, spice shakers. What happens *to* items (cutting, pouring, seasoning, cooking) doesn't sync yet.
 
 1. Back up the save folder first: both copies share it.
 2. Load the **same save** in both copies and don't move anything, then connect.
-3. The client log shows `Matched N of M host containers`. N should be close to M.
+3. The client log shows `Matched N of M host items`. N should be close to M; any type it couldn't match is listed below that line.
 4. Pick up a plate in one copy and walk around. It should follow in the other copy, then land where you put it.
 5. Food on a carried plate moves with it.
-6. Buying a plate from a stack creates a free copy for the other player; putting it back on the stack removes it on both.
+6. Buying a plate, a tool or food creates a free copy for the other player; putting a plate back on its stack removes it on both.
 
 ## Keys
 
