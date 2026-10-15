@@ -302,6 +302,18 @@ namespace CookingSimMP
         // IMovable is an interface, so "== null" skips Unity's destroyed-object check; this does it properly.
         private static bool IsAlive(IMovable movable) => movable is Object obj && obj != null;
 
+        // ---------- Lookups for other syncs (CookingSync) ----------
+
+        // True once both copies share an ID table for the current scene.
+        public bool HasTable => _registryScene != null && _registryScene == SceneManager.GetActiveScene().name;
+
+        public bool TryGetNetId(IMovable movable, out int netId) => _netIdOf.TryGetValue(movable, out netId);
+
+        public bool TryGetItem(int netId, out IMovable movable) =>
+            _byNetId.TryGetValue(netId, out movable) && IsAlive(movable);
+
+        public IEnumerable<KeyValuePair<int, IMovable>> AllItems => _byNetId;
+
         private static Rigidbody MainBodyOf(IMovable m) =>
             m.PhysicsController != null ? m.PhysicsController.MoveRigidbody : null;
 
@@ -704,6 +716,9 @@ namespace CookingSimMP
                     OnRemoteRemoved(reader.GetInt());
                     break;
                 default:
+                    // Door, drawer and switch messages belong to InteractableSync.
+                    if (InteractableSync.Handles(type) || CookingSync.Handles(type))
+                        break;
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
                     break;
             }

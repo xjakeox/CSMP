@@ -34,6 +34,23 @@ Everything you can pick up syncs while someone holds it: containers, loose food,
 5. Food on a carried plate moves with it.
 6. Buying a plate, a tool or food creates a free copy for the other player; putting a plate back on its stack removes it on both.
 
+## Test interactable sync (v0.5)
+
+Doors, drawers and switches sync: fridge and cupboard doors, drawers, stove and oven knobs, oven doors, sink taps, light switches, microwave buttons, the pizza oven valve, Cooking Challenge oven knobs, machine push buttons (mixer, cutter, sauce machine) and fryer oil buttons. When the client joins, it copies the host's state for all of them.
+
+1. Load the same save in both copies and connect as above. Wait a few seconds after the kitchen appears.
+2. The client log shows `[Interact] Snapshot done: ...`. "missing here" and "only here" should both be 0.
+3. Open a fridge door, turn on a stove, switch on the oven and run a tap in one copy. The other copy should do the same. Problems show up as `[Interact]` warnings.
+
+## Test cooking sync (v0.5.1)
+
+The host is in charge of how cooked food is. Both copies still cook on their own, and the host sends the doneness of anything that changed four times a second, which the client copies.
+
+1. Connect, turn on a stove or the grill in either copy and put a steak on it.
+2. The steak should cook at the same rate on both copies. Problems show up as `[Cook]` warnings.
+3. To prove the client really takes the host's values, press **F9** in the client. That stops the client's own cooking. Food on the client should keep cooking at the same rate, now only from the host's updates. Press F9 again to turn it back on.
+4. Cut pieces aren't synced yet (TODO #1); the host logs a warning when one is cooking.
+
 ## Keys
 
 | Key | Action |
@@ -41,3 +58,4 @@ Everything you can pick up syncs while someone holds it: containers, loose food,
 | F10 | Host on the configured port |
 | F11 | Join the configured address and port |
 | F12 | Disconnect |
+| F9 | Client only: turn its own cooking off/on to test cooking sync |

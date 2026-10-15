@@ -20,6 +20,10 @@ namespace CookingSimMP
         HoldEnd = 7,       // "I let go; here is where it ended up."
         ItemSpawned = 8,   // "I bought this item; make a free copy."
         ItemRemoved = 9,   // "This item is gone (e.g. put back on its stack)."
+        InteractReady = 10,    // Client -> host: "I'm settled in this kitchen, send me every door and switch."
+        InteractSnapshot = 11, // Host -> client: state of every door, drawer, knob and switch (host wins).
+        InteractChange = 12,   // "I opened/closed/switched/pressed this interactable."
+        CookState = 13,        // Host -> client: doneness of food that changed (4 times a second).
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
