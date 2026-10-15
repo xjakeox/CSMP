@@ -45,6 +45,7 @@ namespace CookingSimMP
         internal static bool IsClientForBlock;
 
         private float _sendTimer;
+        private bool _sendAll;   // Next send includes every food item, not only the changed ones.
         private readonly Dictionary<int, float> _lastSentSignature = new Dictionary<int, float>();
         private readonly HashSet<int> _warnedAreaMismatch = new HashSet<int>();
         private readonly HashSet<int> _warnedUnknown = new HashSet<int>();
@@ -76,6 +77,9 @@ namespace CookingSimMP
         }
 
         public static bool Handles(MessageType type) => type == MessageType.CookState;
+
+        // Host: resend every item's doneness on the next tick (after a pause, for example).
+        public void SendAllOnNextTick() => _sendAll = true;
 
         private void Reset()
         {
@@ -160,7 +164,7 @@ namespace CookingSimMP
                     continue;
                 float signature = Signature(part);
                 bool known = _lastSentSignature.TryGetValue(pair.Key, out float last);
-                if (known && Mathf.Abs(signature - last) < ChangeEpsilon)
+                if (known && !_sendAll && Mathf.Abs(signature - last) < ChangeEpsilon)
                     continue;
                 _lastSentSignature[pair.Key] = signature;
                 // The first look at an item only records it; it was loaded from the same save on both copies.
@@ -168,6 +172,7 @@ namespace CookingSimMP
                     continue;
                 changed.Add(new KeyValuePair<int, ProductPart>(pair.Key, part));
             }
+            _sendAll = false;
             if (changed.Count == 0)
                 return;
 

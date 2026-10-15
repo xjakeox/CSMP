@@ -36,6 +36,18 @@
 			<HintPath>$(GameDir)\CookingSim_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
+		<Reference Include="UnityEngine.IMGUIModule">
+			<HintPath>$(GameDir)\CookingSim_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="UnityEngine.TextRenderingModule">
+			<HintPath>$(GameDir)\CookingSim_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Steamworks.NET">
+			<HintPath>$(GameDir)\CookingSim_Data\Managed\Steamworks.NET.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
 		<Reference Include="Assembly-CSharp">
 			<HintPath>$(GameDir)\CookingSim_Data\Managed\Assembly-CSharp.dll</HintPath>
 			<Private>false</Private>

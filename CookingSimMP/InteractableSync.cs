@@ -544,6 +544,13 @@ namespace CookingSimMP
 
         // ---------- Join snapshot (host wins) ----------
 
+        // Host: send the full snapshot again once this copy is settled (after a pause, for example).
+        internal void ResendSnapshot()
+        {
+            if (_session.IsHost && Settled)
+                _pendingReadyScene = _kitchenScene;
+        }
+
         private void SendSnapshot(string scene)
         {
             BuildTable(scene);

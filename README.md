@@ -13,9 +13,11 @@ Only this mod's DLL and LiteNetLib.dll are ever distributed. Game files and deco
 ## Test the connection on one PC (milestone 1)
 
 1. Start one copy from Steam and a second by running `CookingSim.exe` directly (needs `steam_appid.txt` with `641320` in the game folder). Don't save in the second copy, since both share one save folder.
-2. In copy A press **F10** to host. In copy B press **F11** to join `127.0.0.1:9050`.
+2. In copy A press **F10**, check the addresses it lists, and click **Host**. In copy B press **F11**, leave `127.0.0.1` in the box and click **Connect** (or press Enter).
 3. Both logs (`BepInEx\LogOutput.log` and `LogOutput.log.1`) should show `Received from peer 0: "hello from ..."`.
-4. **F12** disconnects. The address and port live in `BepInEx\config\com.jake.cookingsimmp.cfg`.
+4. **F12** disconnects. The port and the last joined address live in `BepInEx\config\com.jake.cookingsimmp.cfg`.
+
+To play with a friend, they type your Tailscale/VPN address (shown in your F10 window) into their F11 window. Over the plain internet they need your public IP, and UDP port 9050 must be forwarded on your router. Type `address:port` to use a different port.
 
 ## Test the ghost player (milestone 2)
 
@@ -51,11 +53,21 @@ The host is in charge of how cooked food is. Both copies still cook on their own
 3. To prove the client really takes the host's values, press **F9** in the client. That stops the client's own cooking. Food on the client should keep cooking at the same rate, now only from the host's updates. Press F9 again to turn it back on.
 4. Cut pieces aren't synced yet (TODO #1); the host logs a warning when one is cooking.
 
+## Test pause sync (v0.6)
+
+The host is in charge of game time. Clients can't open the pause menu while connected.
+
+1. Connect and load into the kitchen in both copies.
+2. In the host, press **Esc**. The client should freeze and show "Game paused by host". Food stops cooking on both.
+3. Resume in the host. The client unfreezes. Doneness shouldn't jump backwards on the client.
+4. In the client, press **Esc**. No pause menu opens; both screens show "<name> is asking to pause" for a few seconds. Pressing again within 5 seconds does nothing. Esc still closes other windows such as the recipe book.
+5. Pause the host, then press F12 in the host. The client unfreezes and shows "Host disconnected".
+
 ## Keys
 
 | Key | Action |
 |---|---|
-| F10 | Host on the configured port |
-| F11 | Join the configured address and port |
+| F10 | Open the host window (lists your addresses; Host or Cancel) |
+| F11 | Open the join window (type the host's address; Connect or Cancel) |
 | F12 | Disconnect |
 | F9 | Client only: turn its own cooking off/on to test cooking sync |

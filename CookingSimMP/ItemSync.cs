@@ -716,8 +716,8 @@ namespace CookingSimMP
                     OnRemoteRemoved(reader.GetInt());
                     break;
                 default:
-                    // Door, drawer and switch messages belong to InteractableSync.
-                    if (InteractableSync.Handles(type) || CookingSync.Handles(type))
+                    // Door, cooking and pause messages belong to the other syncs.
+                    if (InteractableSync.Handles(type) || CookingSync.Handles(type) || PauseSync.Handles(type))
                         break;
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
                     break;

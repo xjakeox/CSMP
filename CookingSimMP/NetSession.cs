@@ -24,6 +24,8 @@ namespace CookingSimMP
         InteractSnapshot = 11, // Host -> client: state of every door, drawer, knob and switch (host wins).
         InteractChange = 12,   // "I opened/closed/switched/pressed this interactable."
         CookState = 13,        // Host -> client: doneness of food that changed (4 times a second).
+        PauseState = 14,       // Host -> client: "My clock is stopped/running again" (pause menu or other).
+        PauseRequest = 15,     // "<name> is asking to pause." Client -> host, then host -> every client.
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
@@ -41,12 +43,15 @@ namespace CookingSimMP
         private bool _stopAfterPoll;
 
         public event Action<int, PlayerState> PlayerStateReceived;
+        public event Action<int> PeerJoined;
         public event Action<int> PeerLeft;
         public event Action Stopped;
         // Every message type NetSession doesn't handle itself goes here.
         public event Action<int, MessageType, NetPacketReader> MessageReceived;
 
         public bool IsHost => _isHost;
+
+        public bool IsRunning => _net.IsRunning;
 
         public bool IsConnected => _net.IsRunning && _net.ConnectedPeersCount > 0;
 
@@ -152,6 +157,7 @@ namespace CookingSimMP
             _writer.Put((byte)MessageType.Hello);
             _writer.Put($"hello from {Role} (process {ProcessId})");
             peer.Send(_writer, DeliveryMethod.ReliableOrdered);
+            PeerJoined?.Invoke(peer.Id);
         }
 
         private void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
