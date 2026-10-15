@@ -23,6 +23,15 @@ Only this mod's DLL and LiteNetLib.dll are ever distributed. Game files and deco
 2. Each copy should show a blue capsule with a head cube where the other player stands. The cube's "nose" points where they look, and the capsule gets shorter when they crouch.
 3. The log shows `Receiving position updates from peer 0` once updates start arriving.
 
+## Test held-object sync (milestone 3)
+
+Only containers (plates, bowls, pots, pans) sync so far, and only while someone holds one.
+
+1. Back up the save folder first: both copies share it.
+2. Load the **same save** in both copies and don't move anything, then connect.
+3. The client log shows `Matched N of M host containers`. N should be close to M.
+4. Pick up a plate in one copy and walk around. It should follow in the other copy, then land where you put it.
+
 ## Keys
 
 | Key | Action |

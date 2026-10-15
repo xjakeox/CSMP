@@ -13,6 +13,11 @@ namespace CookingSimMP
     {
         Hello = 1,
         PlayerState = 2,
+        ClientReady = 3,   // Client -> host: "I'm in this kitchen, send me the item list."
+        ItemRegistry = 4,  // Host -> client: network ID, asset ID and position of every container.
+        HoldStart = 5,     // "I picked up this item."
+        HoldPose = 6,      // "This item is here now." (sent 20 times per second while held)
+        HoldEnd = 7,       // "I let go; here is where it ended up."
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
@@ -31,6 +36,10 @@ namespace CookingSimMP
         public event Action<int, PlayerState> PlayerStateReceived;
         public event Action<int> PeerLeft;
         public event Action Stopped;
+        // Every message type NetSession doesn't handle itself goes here.
+        public event Action<int, MessageType, NetPacketReader> MessageReceived;
+
+        public bool IsHost => _isHost;
 
         public bool IsConnected => _net.IsRunning && _net.ConnectedPeersCount > 0;
 
@@ -104,6 +113,19 @@ namespace CookingSimMP
             _net.SendToAll(_writer, DeliveryMethod.Sequenced);
         }
 
+        // Start a message: write its fields into the returned writer, then call SendToAll.
+        public NetDataWriter BeginMessage(MessageType type)
+        {
+            _writer.Reset();
+            _writer.Put((byte)type);
+            return _writer;
+        }
+
+        public void SendToAll(DeliveryMethod deliveryMethod)
+        {
+            _net.SendToAll(_writer, deliveryMethod);
+        }
+
         private void OnConnectionRequest(ConnectionRequest request)
         {
             _log.LogInfo($"Connection request from {request.RemoteEndPoint}.");
@@ -137,6 +159,11 @@ namespace CookingSimMP
                     PlayerStateReceived?.Invoke(peer.Id, PlayerState.Read(reader));
                     break;
                 default:
+                    if (MessageReceived != null)
+                    {
+                        MessageReceived(peer.Id, type, reader);
+                        break;
+                    }
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peer.Id}.");
                     break;
             }
