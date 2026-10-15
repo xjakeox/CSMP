@@ -18,6 +18,8 @@ namespace CookingSimMP
         HoldStart = 5,     // "I picked up this item."
         HoldPose = 6,      // "This item is here now." (sent 20 times per second while held)
         HoldEnd = 7,       // "I let go; here is where it ended up."
+        ItemSpawned = 8,   // "I bought this item; make a free copy."
+        ItemRemoved = 9,   // "This item is gone (e.g. put back on its stack)."
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.

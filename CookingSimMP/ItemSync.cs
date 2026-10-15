@@ -4,6 +4,7 @@ using LiteNetLib;
 using LiteNetLib.Utils;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using WIUtils;
 
 namespace CookingSimMP
 {
@@ -41,6 +42,10 @@ namespace CookingSimMP
 
         private const int NoId = -1;
 
+        // Items created during play get IDs from separate ranges so the two copies never pick the same one.
+        // (The host's starting table uses 0, 1, 2...)
+        private int _nextLocalId;
+
         private sealed class RemoteHeldItem
         {
             public Container Container;
@@ -48,6 +53,16 @@ namespace CookingSimMP
             public bool WasKinematic;
             public Vector3 TargetPosition;
             public Quaternion TargetRotation;
+            public List<CarriedItem> Contents = new List<CarriedItem>();
+        }
+
+        // Food or another container sitting in a remotely held container. Pinned to it until the drop.
+        private sealed class CarriedItem
+        {
+            public Rigidbody Body;
+            public bool WasKinematic;
+            public Vector3 LocalPosition;
+            public Quaternion LocalRotation;
         }
 
         public ItemSync(NetSession session, ManualLogSource log)
@@ -57,6 +72,8 @@ namespace CookingSimMP
             _session.MessageReceived += OnMessage;
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
+            // Fires after a stack (pile of plates, bowls...) creates a bought item and puts it in the hand.
+            Stack.OnBuy += OnLocalBuy;
         }
 
         public void Tick(float deltaTime)
@@ -174,6 +191,7 @@ namespace CookingSimMP
             ClearTable();
             _readySentForScene = null;
             _pendingReadyScene = null;
+            _nextLocalId = 0;
         }
 
         // ---------- Local player picking up and dropping ----------
@@ -203,13 +221,7 @@ namespace CookingSimMP
 
             if (!unregister)
             {
-                if (_settlingId != NoId && _settlingId != netId)
-                    FinishSettling();
-                _settlingId = NoId;
-                _heldId = netId;
-                _session.BeginMessage(MessageType.HoldStart).Put(netId);
-                _session.SendToAll(DeliveryMethod.ReliableOrdered);
-                _log.LogInfo($"Picked up container {netId} (asset {container.AssetId}).");
+                StartLocalHold(netId, container);
             }
             else if (_heldId == netId)
             {
@@ -220,8 +232,52 @@ namespace CookingSimMP
             }
         }
 
+        private void StartLocalHold(int netId, Container container)
+        {
+            if (_heldId == netId)
+                return;
+            if (_settlingId != NoId && _settlingId != netId)
+                FinishSettling();
+            _settlingId = NoId;
+            _heldId = netId;
+            _session.BeginMessage(MessageType.HoldStart).Put(netId);
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _log.LogInfo($"Picked up container {netId} (asset {container.AssetId}).");
+        }
+
+        // Stack.OnLeftClick creates the item with ObjectsFactory.CreateContainer and charges for it.
+        // The other copy gets a free copy of the same item, then follows it like any held item.
+        private void OnLocalBuy(Clickable bought)
+        {
+            if (!(bought is Container container) || container == null || _netIdOf.ContainsKey(container))
+                return;
+            if (!_session.IsConnected || _registryScene == null)
+                return;
+
+            int netId = (_session.IsHost ? 1_000_000 : 2_000_000) + _nextLocalId++;
+            _byNetId[netId] = container;
+            _netIdOf[container] = netId;
+
+            NetDataWriter writer = _session.BeginMessage(MessageType.ItemSpawned);
+            writer.Put(netId);
+            writer.Put(container.AssetId);
+            PutVector(writer, container.transform.position);
+            PutQuaternion(writer, container.transform.rotation);
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _log.LogInfo($"Bought container {netId} (asset {container.AssetId}); sent it to the other player.");
+
+            // The pick-up already happened before this item had an ID, so start the hold here.
+            if (Player.Me != null && ReferenceEquals(Player.Me.ActiveMovable, container))
+                StartLocalHold(netId, container);
+        }
+
         private void SendLocalPoses(float deltaTime)
         {
+            // An item vanishing while we hold it or it settles means the game removed it,
+            // e.g. a plate put back on its stack (ActionsManager.Remove).
+            CheckRemoved(ref _heldId);
+            CheckRemoved(ref _settlingId);
+
             if (_settlingId != NoId)
             {
                 _settleTimer -= deltaTime;
@@ -236,6 +292,27 @@ namespace CookingSimMP
 
             SendPose(_heldId, MessageType.HoldPose, DeliveryMethod.Sequenced);
             SendPose(_settlingId, MessageType.HoldPose, DeliveryMethod.Sequenced);
+        }
+
+        private void CheckRemoved(ref int netId)
+        {
+            if (netId == NoId || !_byNetId.TryGetValue(netId, out Container c) || c != null)
+                return;
+            _session.BeginMessage(MessageType.ItemRemoved).Put(netId);
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _log.LogInfo($"Container {netId} was removed; told the other player.");
+            ForgetItem(netId);
+            netId = NoId;
+        }
+
+        private void ForgetItem(int netId)
+        {
+            if (_byNetId.TryGetValue(netId, out Container c))
+            {
+                _byNetId.Remove(netId);
+                if (!ReferenceEquals(c, null))
+                    _netIdOf.Remove(c);
+            }
         }
 
         private void FinishSettling()
@@ -280,10 +357,55 @@ namespace CookingSimMP
                 case MessageType.HoldEnd:
                     OnRemotePose(reader, end: true);
                     break;
+                case MessageType.ItemSpawned:
+                    OnRemoteSpawn(reader);
+                    break;
+                case MessageType.ItemRemoved:
+                    OnRemoteRemoved(reader.GetInt());
+                    break;
                 default:
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
                     break;
             }
+        }
+
+        private void OnRemoteSpawn(NetPacketReader reader)
+        {
+            int netId = reader.GetInt();
+            int assetId = reader.GetInt();
+            Vector3 position = GetVector(reader);
+            Quaternion rotation = GetQuaternion(reader);
+
+            if (_registryScene == null || Player.Me == null)
+            {
+                _log.LogWarning($"Other player bought container {netId}, but this copy isn't synced to a kitchen yet.");
+                return;
+            }
+
+            // Same factory call a stack uses, with pay: false so only the buyer is charged.
+            Container c = Game.KitchenServices.ObjectsFactory.CreateContainer(assetId, position, Vector3.one, rotation, pay: false);
+            if (c == null)
+            {
+                _log.LogWarning($"Couldn't create container asset {assetId} for the other player's purchase.");
+                return;
+            }
+            c.OnCreate(null);
+            _byNetId[netId] = c;
+            _netIdOf[c] = netId;
+            _log.LogInfo($"Other player bought container {netId} (asset {assetId}); created a copy here.");
+        }
+
+        private void OnRemoteRemoved(int netId)
+        {
+            if (_remoteHeld.TryGetValue(netId, out RemoteHeldItem item))
+            {
+                ReleaseRemoteHeld(item, snap: false);
+                _remoteHeld.Remove(netId);
+            }
+            if (_byNetId.TryGetValue(netId, out Container c) && c != null)
+                Singleton<ActionsManager>.Me.Remove(c);
+            ForgetItem(netId);
+            _log.LogInfo($"Other player removed container {netId}; removed it here too.");
         }
 
         private void OnRemoteHoldStart(int netId)
@@ -308,8 +430,9 @@ namespace CookingSimMP
             // Kinematic: physics stops pushing it around, so it only moves where we put it.
             if (body != null)
                 body.isKinematic = true;
+            PinContents(item);
             _remoteHeld[netId] = item;
-            _log.LogInfo($"Other player picked up container {netId} (asset {c.AssetId}).");
+            _log.LogInfo($"Other player picked up container {netId} (asset {c.AssetId}), carrying {item.Contents.Count} items.");
         }
 
         private void OnRemotePose(NetPacketReader reader, bool end)
@@ -344,6 +467,7 @@ namespace CookingSimMP
                 Transform tr = item.Container.transform;
                 tr.position = Vector3.Lerp(tr.position, item.TargetPosition, t);
                 tr.rotation = Quaternion.Slerp(tr.rotation, item.TargetRotation, t);
+                MoveContents(item);
             }
         }
 
@@ -359,7 +483,15 @@ namespace CookingSimMP
             if (item.Container == null)
                 return;
             if (snap)
+            {
                 item.Container.transform.SetPositionAndRotation(item.TargetPosition, item.TargetRotation);
+                MoveContents(item);
+            }
+            foreach (CarriedItem carried in item.Contents)
+            {
+                if (carried.Body != null)
+                    carried.Body.isKinematic = carried.WasKinematic;
+            }
             if (item.Body != null)
             {
                 item.Body.isKinematic = item.WasKinematic;
@@ -368,6 +500,50 @@ namespace CookingSimMP
                     item.Body.velocity = Vector3.zero;
                     item.Body.angularVelocity = Vector3.zero;
                 }
+            }
+        }
+
+        // When the game moves a container itself (Container.OnPick / SetAllAsKinematic) it makes the contents
+        // kinematic and carries them along. On the remote copy we do the same by hand: remember where each item
+        // sits relative to the container and keep it there.
+        private static void PinContents(RemoteHeldItem item)
+        {
+            Transform container = item.Container.transform;
+            Quaternion inverse = Quaternion.Inverse(container.rotation);
+            var seen = new HashSet<Rigidbody>();
+            if (item.Body != null)
+                seen.Add(item.Body);
+
+            var movables = new List<IMovable>(item.Container.MovablesRecursive);
+            foreach (ProductPart part in item.Container.Parts)
+                movables.Add(part);
+
+            foreach (IMovable movable in movables)
+            {
+                Rigidbody body = movable?.PhysicsController != null ? movable.PhysicsController.MoveRigidbody : null;
+                if (body == null || !seen.Add(body))
+                    continue;
+                item.Contents.Add(new CarriedItem
+                {
+                    Body = body,
+                    WasKinematic = body.isKinematic,
+                    LocalPosition = inverse * (body.position - container.position),
+                    LocalRotation = inverse * body.rotation,
+                });
+                body.isKinematic = true;
+            }
+        }
+
+        private static void MoveContents(RemoteHeldItem item)
+        {
+            Transform container = item.Container.transform;
+            foreach (CarriedItem carried in item.Contents)
+            {
+                if (carried.Body == null)
+                    continue;
+                carried.Body.transform.SetPositionAndRotation(
+                    container.position + container.rotation * carried.LocalPosition,
+                    container.rotation * carried.LocalRotation);
             }
         }
 

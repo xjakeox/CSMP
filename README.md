@@ -31,6 +31,8 @@ Only containers (plates, bowls, pots, pans) sync so far, and only while someone 
 2. Load the **same save** in both copies and don't move anything, then connect.
 3. The client log shows `Matched N of M host containers`. N should be close to M.
 4. Pick up a plate in one copy and walk around. It should follow in the other copy, then land where you put it.
+5. Food on a carried plate moves with it.
+6. Buying a plate from a stack creates a free copy for the other player; putting it back on the stack removes it on both.
 
 ## Keys
 
