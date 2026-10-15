@@ -1,0 +1,12 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Never commit game files or decompiled code
+*.decomp/
+Assembly-CSharp*.dll
