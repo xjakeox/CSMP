@@ -52,6 +52,14 @@
 			<HintPath>$(GameDir)\CookingSim_Data\Managed\Newtonsoft.Json.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
+		<Reference Include="Ionic.Zip.Reduced">
+			<HintPath>$(GameDir)\CookingSim_Data\Managed\Ionic.Zip.Reduced.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.BC.GamingPlatform">
+			<HintPath>$(GameDir)\CookingSim_Data\Managed\Unity.BC.GamingPlatform.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
 		<Reference Include="Assembly-CSharp">
 			<HintPath>$(GameDir)\CookingSim_Data\Managed\Assembly-CSharp.dll</HintPath>
 			<Private>false</Private>

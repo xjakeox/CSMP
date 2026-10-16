@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -36,6 +37,20 @@ namespace CookingSimMP
         LogMarker = 23,        // "Write test marker N into your log too" (F8).
         MopState = 24,         // "My mop head is here" (while mopping), or "I put the mop down here".
         ContentRest = 25,      // "The pan/tray I carried came to rest; this food in it ended up exactly here."
+        WorldRequest = 26,     // Client -> host: "Versions match; send me your world." Carries the player's name.
+        WorldBegin = 27,       // Host -> client: "My world follows": size, kitchen, game mode and content IDs.
+        WorldChunk = 28,       // Host -> client: one piece of the world save.
+        WorldLoaded = 29,      // Client -> host: "I've loaded your world and I'm in the kitchen."
+        WorldRefused = 30,     // Client -> host: "I can't load your world" (missing DLC), with the reason.
+        WorldLeaving = 31,     // Host -> client: "I left my kitchen; you'll get the next one when I'm in it."
+        OrderList = 32,        // Host -> client: every open customer order with its timer, plus fame (twice a second).
+        OrderEnded = 33,       // Either way: "This order was served (or failed) here", with the served plate's ID.
+        KitchenClosed = 34,    // Host -> client: "No more customers today; skipping to cleaning."
+        OrderRequest = 35,     // Client -> host (sandbox only): "Start this recipe as an order", from the client's tablet.
+        TimerState = 36,       // Host -> client: a kitchen timer is idle, counting (with the time left) or ringing.
+        TimerRequest = 37,     // Client -> host: "I set, cancelled or silenced this kitchen timer."
+        ItemBroken = 38,       // Either way: "This item broke here", with where it was, so the other copy breaks it too.
+        ItemSeated = 39,       // Either way: where a just-bought item settled inside the container it was bought into.
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
@@ -51,10 +66,17 @@ namespace CookingSimMP
         private readonly NetDataWriter _writer = new NetDataWriter();
         private bool _isHost;
         private bool _stopAfterPoll;
+        private readonly Dictionary<int, NetPeer> _peers = new Dictionary<int, NetPeer>();
 
         public event Action<int, PlayerState> PlayerStateReceived;
         public event Action<int> PeerJoined;
         public event Action<int> PeerLeft;
+        // The other copy runs the same mod version (checked in Hello). The client then asks for the world.
+        public event Action<int> PeerVerified;
+        // A new world is being sent (host) or loaded (client): every sync drops what it knew about the old one.
+        public event Action WorldReset;
+        // While a peer is loading a new world, its messages about the old one are dropped. Set by WorldSync.
+        public Func<int, MessageType, bool> DropMessage;
         public event Action Stopped;
         // Every message type NetSession doesn't handle itself goes here.
         public event Action<int, MessageType, NetPacketReader> MessageReceived;
@@ -83,6 +105,13 @@ namespace CookingSimMP
             if (_net.IsRunning)
             {
                 _log.LogWarning($"Already running as {Role}. Press F12 to disconnect first.");
+                return;
+            }
+            // Joining players load the host's world, so there has to be one.
+            if (!WorldSync.HostInKitchen)
+            {
+                _log.LogWarning("Load a kitchen before hosting.");
+                PauseSync.Instance?.Notify("Load a kitchen before hosting");
                 return;
             }
             if (!_net.Start(port))
@@ -116,8 +145,21 @@ namespace CookingSimMP
             if (!_net.IsRunning)
                 return;
             _net.Stop();
+            _peers.Clear();
             _log.LogInfo("Disconnected and stopped networking.");
             Stopped?.Invoke();
+        }
+
+        // Stop once the current Poll() is done; safe to call from inside a message handler.
+        public void StopAfterPoll() => _stopAfterPoll = true;
+
+        public void RaiseWorldReset() => WorldReset?.Invoke();
+
+        // Send the current message to one peer only.
+        public void SendTo(int peerId, DeliveryMethod deliveryMethod)
+        {
+            if (_peers.TryGetValue(peerId, out NetPeer peer))
+                peer.Send(_writer, deliveryMethod);
         }
 
         public void Poll()
@@ -166,13 +208,16 @@ namespace CookingSimMP
             _writer.Reset();
             _writer.Put((byte)MessageType.Hello);
             _writer.Put($"hello from {Role} (process {ProcessId})");
+            _writer.Put(Plugin.PluginVersion);
             peer.Send(_writer, DeliveryMethod.ReliableOrdered);
+            _peers[peer.Id] = peer;
             PeerJoined?.Invoke(peer.Id);
         }
 
         private void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
         {
             _log.LogInfo($"Peer {peer.Id} disconnected: {info.Reason}.");
+            _peers.Remove(peer.Id);
             PeerLeft?.Invoke(peer.Id);
             // A client with no host left has nothing to do; stop so F10/F11 work again without F12.
             if (!_isHost)
@@ -189,12 +234,14 @@ namespace CookingSimMP
             switch (type)
             {
                 case MessageType.Hello:
-                    _log.LogInfo($"Received from peer {peer.Id}: \"{reader.GetString(256)}\"");
+                    OnHello(peer, reader);
                     break;
                 case MessageType.PlayerState:
                     PlayerStateReceived?.Invoke(peer.Id, PlayerState.Read(reader));
                     break;
                 default:
+                    if (DropMessage != null && DropMessage(peer.Id, type))
+                        break;
                     if (MessageReceived != null)
                     {
                         MessageReceived(peer.Id, type, reader);
@@ -204,6 +251,27 @@ namespace CookingSimMP
                     break;
             }
             reader.Recycle();
+        }
+
+        // Both copies must run the same mod version; v0.8.5 and older don't send one.
+        private void OnHello(NetPeer peer, NetPacketReader reader)
+        {
+            _log.LogInfo($"Received from peer {peer.Id}: \"{reader.GetString(256)}\"");
+            string theirs = reader.AvailableBytes > 0 ? reader.GetString(32) : "0.8.5 or older";
+            if (theirs == Plugin.PluginVersion)
+            {
+                PeerVerified?.Invoke(peer.Id);
+                return;
+            }
+            string text = _isHost
+                ? $"A player tried to join with CSMP {theirs}; you have {Plugin.PluginVersion}. Both need the same version."
+                : $"The host has CSMP {theirs}; you have {Plugin.PluginVersion}. Both need the same version.";
+            _log.LogWarning(text);
+            PauseSync.Instance?.Notify(text, 10f);
+            if (_isHost)
+                peer.Disconnect();
+            else
+                _stopAfterPoll = true;
         }
 
         private void OnNetworkError(IPEndPoint endPoint, SocketError socketError)

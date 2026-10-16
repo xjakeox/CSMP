@@ -83,6 +83,7 @@ namespace CookingSimMP
             _session.MessageReceived += OnMessage;
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
+            _session.WorldReset += Reset;
 
             // Everything that changes a container's contents: pouring and pouring in loose spices, spilling or pouring
             // out, emptying, tasting, and the helpers that throw contents away.
@@ -347,11 +348,42 @@ namespace CookingSimMP
         {
             List<ProductPartStats> list = state?.V ?? new List<ProductPartStats>();
             FixUp(list);
+            // The hover window keeps the liquid's stats object it opened with, so swapping in new objects froze its
+            // heat colour until the player looked away. When the same liquids are still there, update them in place.
+            if (SameProducts(c.virtualProductPartStats, list))
+            {
+                for (int i = 0; i < list.Count; i++)
+                    CopyStats(list[i], c.virtualProductPartStats[i]);
+                list = c.virtualProductPartStats;
+            }
             c.ApplySaveData(list, state != null ? state.T : 0f);
             c.OnFluidQuantityChange?.Invoke();
             // Loading never empties a pot, so hide the liquid by hand when it's all gone.
             if (c.FluidsQuantity <= 0f && c.water != null)
                 c.water.Active = false;
+        }
+
+        private static readonly FieldInfo[] StatsFields =
+            typeof(ProductPartStats).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+        private static bool SameProducts(List<ProductPartStats> current, List<ProductPartStats> incoming)
+        {
+            if (current == null || current.Count != incoming.Count)
+                return false;
+            for (int i = 0; i < current.Count; i++)
+            {
+#pragma warning disable CS0618 // The save data itself still uses productID.
+                if (current[i] == null || incoming[i] == null || current[i].productID != incoming[i].productID)
+                    return false;
+#pragma warning restore CS0618
+            }
+            return true;
+        }
+
+        private static void CopyStats(ProductPartStats from, ProductPartStats to)
+        {
+            foreach (FieldInfo field in StatsFields)
+                field.SetValue(to, field.GetValue(from));
         }
 
         private static void ApplyPart(ProductPart p, PartSeasoning state)

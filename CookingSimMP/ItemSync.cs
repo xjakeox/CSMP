@@ -11,10 +11,10 @@ namespace CookingSimMP
     // Syncs every item a player can pick up (anything implementing the game's IMovable: containers, loose food,
     // knives and other tools, oil bottles and spice shakers, dummies) while someone moves it, plus buying new ones.
     //
-    // Matching: the game's own GlobalId is random per copy and never saved (SaveLoadManager.GetGlobalId),
-    // so it can't identify the same item on both machines. Instead the host numbers every item and sends
-    // (number, type, asset ID, position); the client pairs each with its own nearest item of the same type
-    // and asset ID. This only works when both copies loaded the same save and nothing has moved yet.
+    // Matching: the host numbers every item and sends (number, type, asset ID, GlobalId, position). The client
+    // loaded the host's world (WorldSync), and the game saves and restores each item's GlobalId, so it pairs
+    // each entry with its own item of the same type, asset ID and GlobalId. Items without a matching GlobalId
+    // (scene objects the save doesn't cover) fall back to the nearest item of the same type and asset ID.
     //
     // Authority: whoever last touched an item sends its pose while it moves. The other copy freezes its
     // physics and follows.
@@ -124,6 +124,7 @@ namespace CookingSimMP
             PatchPick();
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
+            _session.WorldReset += Reset;
             // Stacks (plates, bowls, tools...) create the bought item and put it in the hand.
             Stack.OnBuy += OnStackBuy;
             // The shopping box (GUIBoxOfStuff) creates the bought item the same way and raises its own OnBuy.
@@ -135,7 +136,7 @@ namespace CookingSimMP
         public void Tick(float deltaTime)
         {
             string scene = SceneManager.GetActiveScene().name;
-            bool inKitchen = Player.Me != null;
+            bool inKitchen = WorldSync.InKitchen;
 
             // A new scene destroys every item, so the old ID table is useless.
             if (_registryScene != null && _registryScene != scene)
@@ -168,6 +169,62 @@ namespace CookingSimMP
             }
 
             UpdateLocalTracks(deltaTime);
+            SendPendingSeats(deltaTime);
+        }
+
+        private void SendPendingSeats(float deltaTime)
+        {
+            _seatClock += deltaTime;
+            for (int i = _pendingSeats.Count - 1; i >= 0; i--)
+            {
+                PendingSeat seat = _pendingSeats[i];
+                if (_seatClock < seat.Due)
+                    continue;
+                if (!_session.IsConnected || !_byNetId.TryGetValue(seat.NetId, out IMovable m) || !IsAlive(m)
+                    || !_byNetId.TryGetValue(seat.HolderId, out IMovable holder) || !IsAlive(holder))
+                {
+                    _pendingSeats.RemoveAt(i);
+                    continue;
+                }
+                Transform ht = holder.gameObject.transform;
+                Transform t = m.gameObject.transform;
+                NetDataWriter writer = _session.BeginMessage(MessageType.ItemSeated);
+                writer.Put(seat.NetId);
+                writer.Put(seat.HolderId);
+                PutVector(writer, ht.InverseTransformPoint(t.position));
+                PutQuaternion(writer, Quaternion.Inverse(ht.rotation) * t.rotation);
+                _session.SendToAll(DeliveryMethod.ReliableOrdered);
+                seat.SendsLeft--;
+                if (seat.SendsLeft <= 0)
+                    _pendingSeats.RemoveAt(i);
+                else
+                    seat.Due = _seatClock + SeatDelays[SeatDelays.Length - seat.SendsLeft] - SeatDelays[SeatDelays.Length - seat.SendsLeft - 1];
+            }
+        }
+
+        // The other player's purchase settled in a container they're carrying: move our copy to the same spot in it.
+        private void OnRemoteSeated(NetPacketReader reader)
+        {
+            int netId = reader.GetInt();
+            int holderId = reader.GetInt();
+            Vector3 localPosition = GetVector(reader);
+            Quaternion localRotation = GetQuaternion(reader);
+            // Only while it's carried; once put down, the final positions come with the drop.
+            if (!_byNetId.TryGetValue(netId, out IMovable m) || !IsAlive(m)
+                || !_remoteHeld.TryGetValue(holderId, out RemoteHeldItem carried) || carried.Main == null)
+                return;
+            Transform ht = carried.Movable.gameObject.transform;
+            Transform root = m.gameObject.transform;
+            root.SetPositionAndRotation(ht.TransformPoint(localPosition), ht.rotation * localRotation);
+            // Its pinned parts now sit somewhere else relative to the carried container; record the new spots.
+            Quaternion inverse = Quaternion.Inverse(carried.Main.rotation);
+            foreach (PinnedPart pinned in carried.Pinned)
+            {
+                if (pinned.Transform == null || (pinned.Transform != root && !pinned.Transform.IsChildOf(root)))
+                    continue;
+                pinned.LocalPosition = inverse * (pinned.Transform.position - carried.Main.position);
+                pinned.LocalRotation = inverse * pinned.Transform.rotation;
+            }
         }
 
         // Runs after every game script's Update, so nothing the game does this frame
@@ -227,10 +284,15 @@ namespace CookingSimMP
                 writer.Put(i);
                 writer.Put(typeIndex[TypeKey(m)]);
                 writer.Put(m.AssetId);
+                writer.Put(m.GlobalId);
                 PutVector(writer, m.gameObject.transform.position);
             }
             _session.SendToAll(DeliveryMethod.ReliableOrdered);
             _log.LogInfo($"Sent item table: {movables.Count} items of {typeNames.Count} types in {scene}.");
+
+            // Something already in the host's hand (held while the client joined) keeps syncing.
+            if (Player.Me != null && Player.Me.ActiveMovable is IMovable held && IsAlive(held) && _netIdOf.ContainsKey(held))
+                OnLocalHandChanged(held, false);
         }
 
         private void ApplyRegistry(NetPacketReader reader)
@@ -253,6 +315,8 @@ namespace CookingSimMP
 
             // Group local items by (type, asset) so matching doesn't scan every item for every entry.
             var unclaimed = new Dictionary<string, List<IMovable>>();
+            var byGlobalId = new Dictionary<int, IMovable>();
+            var duplicateIds = new HashSet<int>();
             int localTotal = 0;
             foreach (IMovable m in FindSceneMovables())
             {
@@ -261,21 +325,33 @@ namespace CookingSimMP
                     unclaimed[key] = list = new List<IMovable>();
                 list.Add(m);
                 localTotal++;
+                if (byGlobalId.ContainsKey(m.GlobalId))
+                    duplicateIds.Add(m.GlobalId);
+                byGlobalId[m.GlobalId] = m;
             }
 
             int count = reader.GetInt();
             int matched = 0;
+            int matchedById = 0;
             var missedByType = new Dictionary<string, int>();
             for (int i = 0; i < count; i++)
             {
                 int netId = reader.GetInt();
                 string typeName = typeNames[reader.GetInt()];
                 int assetId = reader.GetInt();
+                int globalId = reader.GetInt();
                 Vector3 position = GetVector(reader);
 
                 IMovable best = null;
                 float bestDistance = MatchDistance;
-                if (unclaimed.TryGetValue(typeName + "#" + assetId, out List<IMovable> candidates))
+                unclaimed.TryGetValue(typeName + "#" + assetId, out List<IMovable> candidates);
+                if (candidates != null && !duplicateIds.Contains(globalId) && byGlobalId.TryGetValue(globalId, out IMovable same)
+                    && candidates.Contains(same))
+                {
+                    best = same;
+                    matchedById++;
+                }
+                else if (candidates != null)
                 {
                     foreach (IMovable c in candidates)
                     {
@@ -300,7 +376,7 @@ namespace CookingSimMP
                 matched++;
             }
 
-            _log.LogInfo($"Matched {matched} of {count} host items ({localTotal - matched} local items unmatched).");
+            _log.LogInfo($"Matched {matched} of {count} host items, {matchedById} by saved ID ({localTotal - matched} local items unmatched).");
             foreach (KeyValuePair<string, int> pair in missedByType)
                 _log.LogWarning($"  Couldn't match {pair.Value} host item(s) of type {pair.Key}.");
         }
@@ -315,9 +391,23 @@ namespace CookingSimMP
             _unknownInHand = null;
         }
 
+        // Food bought onto a container: when to send where it settled in it (it's created just above and drops in).
+        private sealed class PendingSeat
+        {
+            public int NetId;
+            public int HolderId;
+            public float Due;
+            public int SendsLeft;
+        }
+
+        private static readonly float[] SeatDelays = { 0.5f, 1.5f };
+        private readonly List<PendingSeat> _pendingSeats = new List<PendingSeat>();
+        private float _seatClock;
+
         private void Reset()
         {
             ClearTable();
+            _pendingSeats.Clear();
             _readySentForScene = null;
             _pendingReadyScene = null;
             _nextLocalId = 0;
@@ -896,6 +986,21 @@ namespace CookingSimMP
             PutVector(writer, t.position);
             PutQuaternion(writer, t.rotation);
             PutVector(writer, t.localScale);
+            // Bought straight into a container (food onto the plate in your hand): say which one, and where in it,
+            // so the other copy puts it there and carries it along instead of dropping it to the floor.
+            Container holder = ContainerHolding(movable);
+            if (holder != null && _netIdOf.TryGetValue(holder, out int holderId))
+            {
+                Transform ht = holder.gameObject.transform;
+                writer.Put(holderId);
+                PutVector(writer, ht.InverseTransformPoint(t.position));
+                PutQuaternion(writer, Quaternion.Inverse(ht.rotation) * t.rotation);
+                _pendingSeats.Add(new PendingSeat { NetId = netId, HolderId = holderId, Due = _seatClock + SeatDelays[0], SendsLeft = SeatDelays.Length });
+            }
+            else
+            {
+                writer.Put(-1);
+            }
             _session.SendToAll(DeliveryMethod.ReliableOrdered);
             _log.LogInfo($"Bought {Describe(netId, movable)}; sent it to the other player.");
 
@@ -905,6 +1010,30 @@ namespace CookingSimMP
                 LocalTrack track = TakeAuthority(netId, movable);
                 track.InHand = true;
             }
+        }
+
+        // The container a newly bought item landed in: the one whose spawn point holds it, or the container in the
+        // local player's hand when the item is among its contents.
+        private const float NearHeldContainer = 0.6f;
+
+        private static Container ContainerHolding(IMovable movable)
+        {
+            if (movable.OwnerSpawnPoint != null && movable.OwnerSpawnPoint.Owner is Container owner && IsAlive(owner)
+                && !ReferenceEquals(owner, movable))
+                return owner;
+            if (Player.Me != null && Player.Me.ActiveMovable is Container held && IsAlive(held) && !ReferenceEquals(held, movable))
+            {
+                if (held.MovablesRecursive.Contains(movable))
+                    return held;
+                if (movable is ProductPart part && held.GetPartsRecursive().Contains(part))
+                    return held;
+                // Food bought while holding a container always goes into it, but only the first piece gets the
+                // container's spawn point; later pieces land on top of it and join the contents a physics step
+                // later. So anything that arrived right next to the held container counts as in it.
+                if (Vector3.Distance(held.gameObject.transform.position, movable.gameObject.transform.position) < NearHeldContainer)
+                    return held;
+            }
+            return null;
         }
 
         private static bool TryGetSpawnKind(IMovable movable, out SpawnKind kind)
@@ -1010,13 +1139,16 @@ namespace CookingSimMP
                 case MessageType.ItemSpawned:
                     OnRemoteSpawn(reader);
                     break;
+                case MessageType.ItemSeated:
+                    OnRemoteSeated(reader);
+                    break;
                 case MessageType.ItemRemoved:
                     OnRemoteRemoved(reader.GetInt());
                     break;
                 default:
                     // Door, cooking, pause, money, cut, contents and cleaning messages belong to the other syncs.
-                    if (InteractableSync.Handles(type) || CookingSync.Handles(type) || PauseSync.Handles(type) || MoneySync.Handles(type)
-                        || CutSync.Handles(type) || ContentsSync.Handles(type) || CleaningSync.Handles(type) || MopSync.Handles(type) || type == MessageType.LogMarker)
+                    if (WorldSync.Handles(type) || InteractableSync.Handles(type) || CookingSync.Handles(type) || PauseSync.Handles(type) || MoneySync.Handles(type)
+                        || CutSync.Handles(type) || ContentsSync.Handles(type) || CleaningSync.Handles(type) || MopSync.Handles(type) || OrderSync.Handles(type) || TimerSync.Handles(type) || BreakSync.Handles(type) || type == MessageType.LogMarker)
                         break;
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
                     break;
@@ -1031,6 +1163,25 @@ namespace CookingSimMP
             Vector3 position = GetVector(reader);
             Quaternion rotation = GetQuaternion(reader);
             Vector3 scale = GetVector(reader);
+            int holderId = reader.GetInt();
+            Vector3 localPosition = Vector3.zero;
+            Quaternion localRotation = Quaternion.identity;
+            if (holderId >= 0)
+            {
+                localPosition = GetVector(reader);
+                localRotation = GetQuaternion(reader);
+            }
+            IMovable holder = null;
+            if (holderId >= 0 && _byNetId.TryGetValue(holderId, out holder) && IsAlive(holder))
+            {
+                Transform ht = holder.gameObject.transform;
+                position = ht.TransformPoint(localPosition);
+                rotation = ht.rotation * localRotation;
+            }
+            else
+            {
+                holder = null;
+            }
 
             if (_registryScene == null || Player.Me == null)
             {
@@ -1046,6 +1197,13 @@ namespace CookingSimMP
             }
             _byNetId[netId] = copy;
             _netIdOf[copy] = netId;
+            // The container is in the other player's hands here: carry the new item with it.
+            if (holder != null && _remoteHeld.TryGetValue(holderId, out RemoteHeldItem carried) && carried.Main != null)
+            {
+                PinContent(carried, copy, new HashSet<Transform>());
+                _log.LogInfo($"Other player bought {Describe(netId, copy)} into item {holderId} in their hands; created a copy there.");
+                return;
+            }
             _log.LogInfo($"Other player bought {Describe(netId, copy)}; created a copy here.");
         }
 
@@ -1060,6 +1218,36 @@ namespace CookingSimMP
                 Singleton<ActionsManager>.Me.Remove(m);
             ForgetItem(netId);
             _log.LogInfo($"Other player removed item {netId}; removed it here too.");
+        }
+
+        // The other player served this plate: it left the kitchen on their copy, so it goes here too, with the food on it.
+        public void RemoveServedPlate(int netId)
+        {
+            if (!_byNetId.TryGetValue(netId, out IMovable plate) || !IsAlive(plate))
+            {
+                _log.LogWarning($"Other player served plate {netId}, which this copy couldn't match.");
+                return;
+            }
+            var parts = new List<IMovable>();
+            if (plate is Container container)
+                parts.AddRange(container.MovablesRecursive);
+            parts.Add(plate);
+            foreach (IMovable part in parts)
+            {
+                if (!IsAlive(part))
+                    continue;
+                if (_netIdOf.TryGetValue(part, out int partId))
+                {
+                    if (_remoteHeld.TryGetValue(partId, out RemoteHeldItem held))
+                    {
+                        ReleaseRemoteHeld(held, snap: false);
+                        _remoteHeld.Remove(partId);
+                    }
+                    ForgetItem(partId);
+                }
+                Singleton<ActionsManager>.Me.Remove(part);
+            }
+            _log.LogInfo($"Other player served plate {netId}; removed it here ({parts.Count - 1} items on it).");
         }
 
         private void OnRemoteHoldStart(int netId)
@@ -1392,30 +1580,34 @@ namespace CookingSimMP
                 foreach (ProductPart p in container.GetPartsRecursive())
                     contents.Add(p);
                 foreach (IMovable content in contents)
-                {
-                    if (!IsAlive(content))
-                        continue;
-                    Rigidbody body = MainBodyOf(content);
-                    Transform tr = body != null ? body.transform : content.gameObject.transform;
-                    if (!seen.Add(tr))
-                        continue;
-                    item.ContentCount++;
-                    // Food with bones (fish, meat) must be carried whole: root, main body and every bone.
-                    // Pinning only the main body left the other bones loose, with collisions on, tugged by
-                    // joints to a body we teleport every frame; the food was flung away and vanished.
-                    Transform contentRoot = content.gameObject.transform;
-                    if (contentRoot != tr && seen.Add(contentRoot))
-                        AddPinned(item, contentRoot, null);
-                    AddPinned(item, tr, body);
-                    foreach (Rigidbody bone in SecondaryBodiesOf(content))
-                    {
-                        if (bone != null && seen.Add(bone.transform))
-                            AddPinned(item, bone.transform, bone);
-                    }
-                    if (content is ProductPart part)
-                        PauseJoints(item, part.JointCorrection);
-                }
+                    PinContent(item, content, seen);
             }
+        }
+
+        // One item sitting in a carried container, pinned so it moves with it.
+        private static void PinContent(RemoteHeldItem item, IMovable content, HashSet<Transform> seen)
+        {
+            if (!IsAlive(content))
+                return;
+            Rigidbody body = MainBodyOf(content);
+            Transform tr = body != null ? body.transform : content.gameObject.transform;
+            if (!seen.Add(tr))
+                return;
+            item.ContentCount++;
+            // Food with bones (fish, meat) must be carried whole: root, main body and every bone.
+            // Pinning only the main body left the other bones loose, with collisions on, tugged by
+            // joints to a body we teleport every frame; the food was flung away and vanished.
+            Transform contentRoot = content.gameObject.transform;
+            if (contentRoot != tr && seen.Add(contentRoot))
+                AddPinned(item, contentRoot, null);
+            AddPinned(item, tr, body);
+            foreach (Rigidbody bone in SecondaryBodiesOf(content))
+            {
+                if (bone != null && seen.Add(bone.transform))
+                    AddPinned(item, bone.transform, bone);
+            }
+            if (content is ProductPart part)
+                PauseJoints(item, part.JointCorrection);
         }
 
         private static void AddPinned(RemoteHeldItem item, Transform transform, Rigidbody body)

@@ -248,12 +248,12 @@ namespace CookingSimMP
         // ---------- Overlay ----------
 
         // A short line at the top of the screen, e.g. "Jake is holding that".
-        internal void Notify(string text) => ShowBanner(text);
+        internal void Notify(string text, float seconds = BannerTime) => ShowBanner(text, seconds);
 
-        private void ShowBanner(string text)
+        private void ShowBanner(string text, float seconds = BannerTime)
         {
             _banner = text;
-            _bannerTimer = BannerTime;
+            _bannerTimer = seconds;
         }
 
         public void OnGUI()
@@ -283,7 +283,9 @@ namespace CookingSimMP
 
             if (_bannerTimer > 0f && !string.IsNullOrEmpty(_banner))
             {
-                var rect = new Rect(Screen.width / 2f - 260f, 40f, 520f, 50f);
+                // Long messages (a refused join) wrap onto more lines.
+                float height = Mathf.Max(50f, _bannerStyle.CalcHeight(new GUIContent(_banner), 520f) + 16f);
+                var rect = new Rect(Screen.width / 2f - 260f, 40f, 520f, height);
                 GUI.Box(rect, GUIContent.none, _bannerStyle);
                 GUI.Box(rect, _banner, _bannerStyle);
             }

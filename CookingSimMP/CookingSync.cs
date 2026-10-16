@@ -59,6 +59,7 @@ namespace CookingSimMP
             _session.MessageReceived += OnMessage;
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
+            _session.WorldReset += Reset;
 
             if (PointValuesField == null || ThresholdMetField == null || VisualValueField == null)
                 _log.LogError("[Cook] Couldn't find ThermalGoodnessArea's fields; cooking sync can't work.");

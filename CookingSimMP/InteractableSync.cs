@@ -91,13 +91,14 @@ namespace CookingSimMP
             _session.MessageReceived += OnMessage;
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
+            _session.WorldReset += Reset;
             ApplyPatches();
         }
 
         public static bool Handles(MessageType type) =>
             type == MessageType.InteractReady || type == MessageType.InteractSnapshot || type == MessageType.InteractChange;
 
-        private bool Settled => Player.Me != null && _inKitchenFor >= SettleTime;
+        private bool Settled => WorldSync.InKitchen && _inKitchenFor >= SettleTime;
 
         public void Tick(float deltaTime)
         {
@@ -111,7 +112,7 @@ namespace CookingSimMP
             }
 
             bool wasSettled = Settled;
-            if (Player.Me != null)
+            if (WorldSync.InKitchen)
                 _inKitchenFor += deltaTime;
             else
                 _inKitchenFor = 0f;

@@ -66,6 +66,7 @@ namespace CookingSimMP
             _session.MessageReceived += OnMessage;
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
+            _session.WorldReset += Reset;
 
             try
             {

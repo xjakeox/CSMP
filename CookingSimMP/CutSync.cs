@@ -52,6 +52,7 @@ namespace CookingSimMP
             _session.MessageReceived += OnMessage;
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
+            _session.WorldReset += Reset;
 
             Patch(typeof(ProductPart), "KnifeCut", new[] { typeof(Vector4) }, postfix: nameof(KnifeCutPostfix));
             Patch(AccessTools.TypeByName("Stands.AutomaticCutter"), "OnButtonPushed", Type.EmptyTypes, prefix: nameof(CutterPrefix));

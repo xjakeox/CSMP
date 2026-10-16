@@ -52,6 +52,7 @@ namespace CookingSimMP
             _log = log;
             _session.MessageReceived += OnMessage;
             _session.Stopped += Reset;
+            _session.WorldReset += Reset;
             _session.PeerLeft += _ => { if (!_session.IsHost) Reset(); };
 
             try
@@ -72,7 +73,7 @@ namespace CookingSimMP
         public static bool Handles(MessageType type) =>
             type == MessageType.MoneyReady || type == MessageType.MoneyRequest || type == MessageType.MoneyChange;
 
-        private static bool InKitchen => Player.Me != null;
+        private static bool InKitchen => WorldSync.InKitchen;
 
         private void Reset()
         {

@@ -231,15 +231,17 @@ namespace CookingSimMP
                 if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
                 {
                     e.Use();
-                    if (_open == Window.Host)
+                    if (_open == Window.Host && WorldSync.HostInKitchen)
                         StartHosting();
+                    else if (_open == Window.Host)
+                        Close();
                     else
                         TryJoin();
                     return;
                 }
             }
 
-            float height = _open == Window.Host ? 200f + 26f * Math.Max(1, _addresses.Count) : 230f;
+            float height = _open == Window.Host ? 200f + 26f * Math.Max(1, _addresses.Count) : 260f;
             var rect = new Rect(Screen.width / 2f - Width / 2f, Screen.height / 2f - height / 2f, Width, height);
             // Drawn twice so IMGUI's translucent box is dark enough to read over the kitchen.
             GUI.Box(rect, GUIContent.none, _windowStyle);
@@ -254,6 +256,19 @@ namespace CookingSimMP
 
         private void DrawHost()
         {
+            // Joining players load the host's world, so hosting starts from inside a kitchen.
+            if (!WorldSync.HostInKitchen)
+            {
+                GUILayout.Label("Load a kitchen first", _labelStyle);
+                GUILayout.Label("Hosting shares the kitchen you're playing. Load a save or start a game, then press F10 again.", _labelStyle);
+                GUILayout.FlexibleSpace();
+                GUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("OK", _buttonStyle, GUILayout.Width(120f)))
+                    Close();
+                GUILayout.EndHorizontal();
+                return;
+            }
             GUILayout.Label("Start hosting?", _labelStyle);
             GUILayout.Label($"Others can join your game with one of these addresses and port {_port.Value}:", _labelStyle);
             if (_addresses.Count == 0)
@@ -274,7 +289,7 @@ namespace CookingSimMP
         private void DrawJoin()
         {
             GUILayout.Label("Join a game", _labelStyle);
-            GUILayout.Label($"Host's IP address (add :port if it isn't {_port.Value}):", _labelStyle);
+            GUILayout.Label($"You'll load into the host's kitchen. Host's IP address (add :port if it isn't {_port.Value}):", _labelStyle);
             GUI.SetNextControlName("csmp_join_ip");
             _joinText = GUILayout.TextField(_joinText, 64, _fieldStyle);
             if (_focusField)
