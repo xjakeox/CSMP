@@ -63,6 +63,17 @@ The host is in charge of game time. Clients can't open the pause menu while conn
 4. In the client, press **Esc**. No pause menu opens; both screens show "<name> is asking to pause" for a few seconds. Pressing again within 5 seconds does nothing. Esc still closes other windows such as the recipe book.
 5. Pause the host, then press F12 in the host. The client unfreezes and shows "Host disconnected".
 
+## Test money sync (v0.7)
+
+Both players share one wallet, kept by the host. Buying, dish payments, tips, repairs and recipe purchases all come out of (or go into) it, and each is counted once. Sandbox and the challenges don't use money, so test in career mode.
+
+1. Load the same save in both copies and connect. A few seconds after the kitchen appears, the client's money changes to the host's and its log shows `[Money] Sharing the host's wallet: ...`.
+2. Buy a plate in the host. The money goes down by the plate's price on both screens, not twice.
+3. Buy a plate, a tool and some food in the client. Again the money goes down once, on both screens.
+4. Buy something in both copies at nearly the same moment. Both screens should end on the same amount.
+5. Serve a dish in either copy. The payment and tip show up on both screens.
+6. Known gap: putting a plate back on its stack makes the next plate free only on that player's screen, so the other player still pays for theirs (TODO #5).
+
 ## Keys
 
 | Key | Action |

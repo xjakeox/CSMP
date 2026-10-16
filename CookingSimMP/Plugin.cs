@@ -9,7 +9,7 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "com.jake.cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.6.1";
+        public const string PluginVersion = "0.7.2";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
@@ -19,6 +19,7 @@ namespace CookingSimMP
         private InteractableSync _interactableSync;
         private CookingSync _cookingSync;
         private PauseSync _pauseSync;
+        private MoneySync _moneySync;
         private ConnectWindows _connectWindows;
 
         private void Awake()
@@ -37,6 +38,7 @@ namespace CookingSimMP
             _interactableSync = new InteractableSync(_session, Logger);
             _cookingSync = new CookingSync(_session, _itemSync, Logger);
             _pauseSync = new PauseSync(_session, _cookingSync, _interactableSync, Logger);
+            _moneySync = new MoneySync(_session, Logger);
             _connectWindows = new ConnectWindows(_session, _hostAddress, _port);
             Logger.LogInfo($"{PluginName} {PluginVersion} loaded (process {NetSession.ProcessId}). " +
                            $"F10 = host on port {_port.Value}, F11 = join (asks for the address), F12 = disconnect, F9 (client) = cooking sync test.");
@@ -56,6 +58,7 @@ namespace CookingSimMP
             _interactableSync.Tick(Time.unscaledDeltaTime);
             _cookingSync.Tick(Time.unscaledDeltaTime);
             _pauseSync.Tick(Time.unscaledDeltaTime);
+            _moneySync.Tick(Time.unscaledDeltaTime);
         }
 
         private void LateUpdate() => _itemSync.LateTick(Time.unscaledDeltaTime);

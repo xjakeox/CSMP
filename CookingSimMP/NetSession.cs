@@ -26,6 +26,9 @@ namespace CookingSimMP
         CookState = 13,        // Host -> client: doneness of food that changed (4 times a second).
         PauseState = 14,       // Host -> client: "My clock is stopped/running again" (pause menu or other).
         PauseRequest = 15,     // "<name> is asking to pause." Client -> host, then host -> every client.
+        MoneyReady = 16,       // Client -> host: "I'm in this kitchen, send me the shared balance."
+        MoneyRequest = 17,     // Client -> host: "My cash changed by this much; apply it to the shared wallet."
+        MoneyChange = 18,      // Host -> client: "The wallet changed by this much and now holds this balance."
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.

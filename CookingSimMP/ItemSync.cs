@@ -82,6 +82,7 @@ namespace CookingSimMP
             public Transform Main;               // The transform whose pose is synced (the item's main rigidbody).
             public Rigidbody MainBody;
             public bool MainWasKinematic;
+            public bool MainHadCollisions;
             public Vector3 TargetPosition;
             public Quaternion TargetRotation;
             public List<PinnedPart> Pinned = new List<PinnedPart>();
@@ -98,6 +99,7 @@ namespace CookingSimMP
             public Transform Transform;
             public Rigidbody Body;
             public bool WasKinematic;
+            public bool HadCollisions;
             public Vector3 LocalPosition;
             public Quaternion LocalRotation;
             public bool UnderMain;               // Child of the main transform, so it must be placed after it.
@@ -716,8 +718,8 @@ namespace CookingSimMP
                     OnRemoteRemoved(reader.GetInt());
                     break;
                 default:
-                    // Door, cooking and pause messages belong to the other syncs.
-                    if (InteractableSync.Handles(type) || CookingSync.Handles(type) || PauseSync.Handles(type))
+                    // Door, cooking, pause and money messages belong to the other syncs.
+                    if (InteractableSync.Handles(type) || CookingSync.Handles(type) || PauseSync.Handles(type) || MoneySync.Handles(type))
                         break;
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
                     break;
@@ -783,12 +785,18 @@ namespace CookingSimMP
                 Main = main,
                 MainBody = mainBody,
                 MainWasKinematic = mainBody != null && mainBody.isKinematic,
+                MainHadCollisions = mainBody == null || mainBody.detectCollisions,
                 TargetPosition = main.position,
                 TargetRotation = main.rotation,
             };
             // Kinematic: physics stops pushing it around, so it only moves where we put it.
+            // No collisions: we teleport it every frame, and a teleport into a plate shoves the plate hard
+            // enough to break it on this copy only.
             if (mainBody != null)
+            {
                 mainBody.isKinematic = true;
+                mainBody.detectCollisions = false;
+            }
             PinParts(item);
             if (m is ProductPart heldPart && heldPart.JointCorrection != null)
             {
@@ -922,7 +930,13 @@ namespace CookingSimMP
             if (snap)
                 PlaceAll(item, item.TargetPosition, item.TargetRotation);
             foreach (PinnedPart pinned in item.Pinned)
+            {
+                if (pinned.Body != null)
+                    pinned.Body.detectCollisions = pinned.HadCollisions;
                 RestoreBody(pinned.Body, pinned.WasKinematic);
+            }
+            if (item.MainBody != null)
+                item.MainBody.detectCollisions = item.MainHadCollisions;
             RestoreBody(item.MainBody, item.MainWasKinematic);
             if (item.Joints != null)
                 item.Joints.enabled = item.JointsWereEnabled;
@@ -991,12 +1005,16 @@ namespace CookingSimMP
                 Transform = transform,
                 Body = body,
                 WasKinematic = body != null && body.isKinematic,
+                HadCollisions = body == null || body.detectCollisions,
                 LocalPosition = inverse * (transform.position - item.Main.position),
                 LocalRotation = inverse * transform.rotation,
                 UnderMain = transform.IsChildOf(item.Main),
             });
             if (body != null)
+            {
                 body.isKinematic = true;
+                body.detectCollisions = false;
+            }
         }
 
         // Parents must be placed before their children, or moving the parent drags the child off its spot.
