@@ -230,7 +230,10 @@ namespace CookingSimMP
             }
         }
 
-        internal static string LocalName()
+        internal static string LocalName() => SteamName() ?? "A player";
+
+        // This player's Steam name, or null when Steam isn't running for this copy.
+        internal static string SteamName()
         {
             try
             {
@@ -242,7 +245,7 @@ namespace CookingSimMP
             {
                 // Steam isn't running for this copy.
             }
-            return "A player";
+            return null;
         }
 
         // ---------- Overlay ----------

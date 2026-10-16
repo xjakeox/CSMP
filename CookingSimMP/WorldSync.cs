@@ -78,6 +78,7 @@ namespace CookingSimMP
         private float _skipNoticeCooldown;
 
         private bool _resyncing;          // Host: the world being sent is a RESYNC, not a join.
+        private bool _toldWaitForDay;     // Host: already said that a joining player waits for the next day.
 
         private GUIStyle _style;
         private GUIStyle _resyncStyle;
@@ -177,8 +178,17 @@ namespace CookingSimMP
             }
             _wasInKitchen = inKitchen;
 
-            if (inKitchen && _waiting.Count > 0)
+            // A player who asks while the host is ending the day gets the next day once it has started (v0.11).
+            bool endingDay = CareerSync.HostEndingDay;
+            if (endingDay && _waiting.Count > 0 && !_toldWaitForDay)
             {
+                _toldWaitForDay = true;
+                _log.LogInfo($"[World] {string.Join(", ", NamesOf(_waiting))} will get the world once the next day has started.");
+                PauseSync.Instance?.Notify($"{string.Join(", ", NamesOf(_waiting))} will join when the next day starts");
+            }
+            if (inKitchen && _waiting.Count > 0 && !endingDay)
+            {
+                _toldWaitForDay = false;
                 var peers = new List<int>(_waiting);
                 _waiting.Clear();
                 SendWorld(peers);
@@ -323,7 +333,32 @@ namespace CookingSimMP
             _log.LogInfo($"[World] RESYNC: sending the world again to {string.Join(", ", _names.Values)}.");
         }
 
-        private static bool HostPauseMenuOpen()
+        // Host, v0.11: the end of day is over and the next day has started; every client reloads the world, which
+        // brings them the new day (level, perks, recipes, quests, clock) the same way RESYNC does.
+        internal void ResyncForNextDay()
+        {
+            if (!_session.IsHost || !_session.IsConnected || _names.Count == 0 || !HostInKitchen)
+                return;
+            _resyncing = true;
+            foreach (int peerId in _names.Keys)
+            {
+                if (!_joining.ContainsKey(peerId))
+                    _waiting.Add(peerId);
+            }
+            NetDataWriter writer = _session.BeginMessage(MessageType.WorldLeaving);
+            writer.Put(true);   // A reload of this kitchen...
+            writer.Put(true);   // ...because the next day started.
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _log.LogInfo($"[World] Next day: sending the world again to {string.Join(", ", _names.Values)}.");
+        }
+
+        private IEnumerable<string> NamesOf(IEnumerable<int> peers)
+        {
+            foreach (int peerId in peers)
+                yield return NameOf(peerId);
+        }
+
+        internal static bool HostPauseMenuOpen()
         {
             GUIPauseMenu menu = GUIKitchen.Me != null ? GUIKitchen.Me.pauseMenu : null;
             return menu != null && menu.gameObject.activeInHierarchy;
@@ -342,6 +377,7 @@ namespace CookingSimMP
 
         private void OnStopped()
         {
+            _toldWaitForDay = false;
             _names.Clear();
             _waiting.Clear();
             _joining.Clear();
@@ -562,7 +598,9 @@ namespace CookingSimMP
                     if (_session.IsHost)
                         break;
                     bool resync = reader.AvailableBytes > 0 && reader.GetBool();
-                    PauseSync.Instance?.Notify(resync ? "The host is resyncing; reloading the host's world" : "The host is loading another kitchen; you'll follow", 6f);
+                    bool nextDay = reader.AvailableBytes > 0 && reader.GetBool();
+                    PauseSync.Instance?.Notify(nextDay ? "The host started the next day; loading it"
+                        : resync ? "The host is resyncing; reloading the host's world" : "The host is loading another kitchen; you'll follow", 6f);
                     break;
             }
         }

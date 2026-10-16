@@ -266,6 +266,8 @@ namespace CookingSimMP
             {
                 if (_warnedUnknown.Add(netId))
                     _log.LogWarning($"[Cook] Got doneness for item {netId}, but this copy has no food item with that ID.");
+                // Vanished here only (fish or meat that fell out of the kitchen): ask the host for it.
+                _items.RequestMissing(netId);
                 return;
             }
 

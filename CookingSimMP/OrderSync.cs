@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using BepInEx.Configuration;
 using BepInEx.Logging;
 using CS.GUI;
 using HarmonyLib;
@@ -30,7 +31,7 @@ namespace CookingSimMP
     // Two players serving the same order: the host decides. A client's checkout first asks the host for the order
     // (OrderClaim); the host says yes unless the order is gone or someone else is checking it out. Whoever is
     // refused gets "<name> is serving that order" and their plate back.
-    internal sealed class OrderSync
+    internal sealed partial class OrderSync
     {
         private const float SendInterval = 0.5f;
         private const float KeepEndedFor = 5f;   // Client: an order it just served may still be in the host's next list.
@@ -94,12 +95,13 @@ namespace CookingSimMP
             public List<OrderState> O;
         }
 
-        public OrderSync(NetSession session, ItemSync items, ManualLogSource log)
+        public OrderSync(NetSession session, ItemSync items, ManualLogSource log, ConfigEntry<bool> moreOrders)
         {
             Instance = this;
             _session = session;
             _items = items;
             _log = log;
+            _moreOrders = moreOrders;
             _session.MessageReceived += OnMessage;
             _session.Stopped += Reset;
             _session.WorldReset += Reset;
@@ -115,6 +117,7 @@ namespace CookingSimMP
             Patch(typeof(CheckoutStand), nameof(CheckoutStand.BringOutOrder), prefix: nameof(OrderPatches.BringOutOrderPrefix));
             Patch(typeof(RecipeEvents), nameof(RecipeEvents.EndRecipe), prefix: nameof(OrderPatches.RecipeEventsEndPrefix));
             Patch(typeof(StandardTimeManager), nameof(StandardTimeManager.SkipToCleaning), postfix: nameof(OrderPatches.SkipToCleaningPostfix));
+            PatchMoreOrders();
         }
 
         public static bool Handles(MessageType type) =>
@@ -458,6 +461,10 @@ namespace CookingSimMP
             writer.Put(record);
             writer.Put(scoreJson);
             _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            // The plate and its food leave the kitchen here; the other copy removes its own with this message, so
+            // they mustn't be reported (or asked back) one by one.
+            if (container != null)
+                _items.ForgetServed(container);
         }
 
         private void OnRemoteOrderEnded(NetPacketReader reader)
@@ -594,7 +601,7 @@ namespace CookingSimMP
     }
 
     // Harmony entry points. Each forwards to OrderSync and never lets an exception reach the game.
-    internal static class OrderPatches
+    internal static partial class OrderPatches
     {
         public static bool BringOutOrderPrefix(CheckoutStand __instance, Recipe selected, Container container)
         {

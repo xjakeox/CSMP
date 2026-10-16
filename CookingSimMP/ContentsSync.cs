@@ -431,6 +431,10 @@ namespace CookingSimMP
                     if (pps != null)
                         c.AddVirtualProductToContainer(pps, quantity);
                     c.OnFluidQuantityChange?.Invoke();
+                    // AddVirtualProductToContainer only changes the numbers. The game's own pours and blends go
+                    // through AddFluidToContainer, which also raises the liquid and colours it, so do that here too
+                    // (v0.11.2: a mixture the client blended showed in the host's tooltip but not in the pot).
+                    RefreshLiquid(c);
                 }
                 catch (Exception e)
                 {
@@ -511,6 +515,7 @@ namespace CookingSimMP
             {
                 if (_warnedUnknown.Add(netId))
                     _log.LogWarning($"[Contents] Got contents for item {netId}, but this copy doesn't have it.");
+                _items.RequestMissing(netId);
                 return;
             }
             // The client keeps its own view of something it just poured into; the host's update is older.
@@ -563,6 +568,17 @@ namespace CookingSimMP
             // Loading never empties a pot, so hide the liquid by hand when it's all gone.
             if (c.FluidsQuantity <= 0f && c.water != null)
                 c.water.Active = false;
+        }
+
+        // Redraws a pot's liquid from its contents, the way loading a save does (Container.ApplySaveData).
+        private static void RefreshLiquid(Container c)
+        {
+            c.ChangeWaterPhysicals();
+            foreach (ProductPartStats pps in c.virtualProductPartStats)
+            {
+                if (pps != null)
+                    c.ChangeWaterVisuals(pps);
+            }
         }
 
         private static readonly FieldInfo[] StatsFields =

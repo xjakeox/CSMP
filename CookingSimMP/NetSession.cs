@@ -63,6 +63,11 @@ namespace CookingSimMP
         RepairStop = 49,       // Either way: "I stopped the repair of this appliance."
         PropBroken = 50,       // Either way: "This window, shelf, TV or lamp broke (or cracked, or was fixed) here."
         PieceList = 51,        // Host -> client, after the item table: every broken piece lying around, to rebuild (v0.10.1).
+        ItemMissing = 52,      // Either way: "This item vanished on my copy; send it again" (v0.11).
+        ItemRespawn = 53,      // Either way: answer to ItemMissing, with what it takes to rebuild the item where it is.
+        PerkUsed = 54,         // Host -> client: a once-per-day perk was used (or its daily uses changed).
+        PerkRequest = 55,      // Client -> host: "Use this perk on this order for me" (reroll, reset time, time boost).
+        Bankrupt = 56,         // Host -> client: the restaurant went bankrupt; run the game's bankruptcy here too.
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
@@ -82,6 +87,8 @@ namespace CookingSimMP
         private string _joinTarget;      // Client: "address:port" we're connecting to, for error messages.
         private bool _problemShown;      // Client: a clearer reason is already on screen; don't replace it with the disconnect.
         private readonly Dictionary<int, NetPeer> _peers = new Dictionary<int, NetPeer>();
+        // Each peer's Steam name from their hello (v0.11.3), for the name tag over their chef. Empty if they had none.
+        private readonly Dictionary<int, string> _peerNames = new Dictionary<int, string>();
 
         public event Action<int, PlayerState> PlayerStateReceived;
         public event Action<int> PeerJoined;
@@ -98,12 +105,21 @@ namespace CookingSimMP
         public event Action<string, string, bool> ConnectProblem;
         // Every message type NetSession doesn't handle itself goes here.
         public event Action<int, MessageType, NetPacketReader> MessageReceived;
+        // Client: the host left (closed the game, stopped hosting, timed out) after we were in. Not raised for F12.
+        public event Action HostLost;
 
         public bool IsHost => _isHost;
 
         public bool IsRunning => _net.IsRunning;
 
         public bool IsConnected => _net.IsRunning && _net.ConnectedPeersCount > 0;
+
+        // Players connected to this copy (host: the clients; client: 1, the host).
+        public int PeerCount => _peers.Count;
+
+        // The name to show over a peer's chef: their Steam name, or "Player" when they have none.
+        public string PlayerNameOf(int peerId) =>
+            _peerNames.TryGetValue(peerId, out string name) && !string.IsNullOrEmpty(name) ? name : "Player";
 
         public NetSession(ManualLogSource log)
         {
@@ -180,6 +196,7 @@ namespace CookingSimMP
                 return;
             _net.Stop();
             _peers.Clear();
+            _peerNames.Clear();
             _log.LogInfo("Disconnected and stopped networking.");
             Stopped?.Invoke();
         }
@@ -243,6 +260,7 @@ namespace CookingSimMP
             _writer.Put((byte)MessageType.Hello);
             _writer.Put($"hello from {Role} (process {ProcessId})");
             _writer.Put(Plugin.PluginVersion);
+            _writer.Put(PauseSync.SteamName() ?? string.Empty);
             peer.Send(_writer, DeliveryMethod.ReliableOrdered);
             _peers[peer.Id] = peer;
             PeerJoined?.Invoke(peer.Id);
@@ -252,14 +270,18 @@ namespace CookingSimMP
         {
             _log.LogInfo($"Peer {peer.Id} disconnected: {info.Reason}.");
             _peers.Remove(peer.Id);
+            _peerNames.Remove(peer.Id);
             PeerLeft?.Invoke(peer.Id);
             // A client with no host left has nothing to do; stop so F10/F11 work again without F12.
             if (!_isHost)
             {
                 if (info.Reason == DisconnectReason.ConnectionFailed)
                     _log.LogWarning("Couldn't reach the host. Is the other copy hosting (F10)? Press F11 to try again.");
+                bool wasIn = _verified;
                 ExplainClientDisconnect(info);
                 _stopAfterPoll = true;
+                if (wasIn && info.Reason != DisconnectReason.DisconnectPeerCalled)
+                    HostLost?.Invoke();
             }
         }
 
@@ -334,7 +356,19 @@ namespace CookingSimMP
                         break;
                     if (MessageReceived != null)
                     {
-                        MessageReceived(peer.Id, type, reader);
+                        // Each sync on its own: one that throws mustn't stop the others, and the error has to reach
+                        // LogOutput.log (Unity's own exception log isn't written there).
+                        foreach (Delegate handler in MessageReceived.GetInvocationList())
+                        {
+                            try
+                            {
+                                ((Action<int, MessageType, NetPacketReader>)handler)(peer.Id, type, reader);
+                            }
+                            catch (Exception e)
+                            {
+                                _log.LogError($"Handling {type} from peer {peer.Id} failed in {handler.Method.DeclaringType?.Name}: {e}");
+                            }
+                        }
                         break;
                     }
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peer.Id}.");
@@ -348,6 +382,8 @@ namespace CookingSimMP
         {
             _log.LogInfo($"Received from peer {peer.Id}: \"{reader.GetString(256)}\"");
             string theirs = reader.AvailableBytes > 0 ? reader.GetString(32) : "0.8.5 or older";
+            // v0.11.3 and newer add the sender's Steam name.
+            _peerNames[peer.Id] = reader.AvailableBytes > 0 ? reader.GetString(64) : string.Empty;
             if (theirs == Plugin.PluginVersion)
             {
                 _verified = true;

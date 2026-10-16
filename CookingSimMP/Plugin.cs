@@ -1,4 +1,6 @@
 using BepInEx;
+using System;
+using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -9,10 +11,11 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "com.jake.cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.10.2";
+        public const string PluginVersion = "0.11.3";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
+        private ConfigEntry<bool> _moreOrders;
         private NetSession _session;
         private PlayerSync _playerSync;
         private ItemSync _itemSync;
@@ -32,6 +35,8 @@ namespace CookingSimMP
         private PropSync _propSync;
         private StandSync _standSync;
         private ClockSync _clockSync;
+        private CareerSync _careerSync;
+        private KeepRunning _keepRunning;
         private ConnectWindows _connectWindows;
         private int _marker;
 
@@ -44,6 +49,8 @@ namespace CookingSimMP
                 "Address the F11 join window starts with; it saves whatever you last joined. 127.0.0.1 means this PC; use the host's VPN IP to play with a friend. Add :port to use a different port.");
             _port = Config.Bind("Network", "Port", 9050,
                 "UDP port the host listens on and the joiner connects to.");
+            _moreOrders = Config.Bind("Gameplay", "MoreOrdersWithMorePlayers", true,
+                "Host only: with a second player, the kitchen takes 1.5x the orders at once (another 0.5x per extra player). Also a button in the host's pause menu.");
 
             _session = new NetSession(Logger);
             _session.MessageReceived += OnMarker;
@@ -58,13 +65,15 @@ namespace CookingSimMP
             _cleaningSync = new CleaningSync(_session, _itemSync, Logger);
             _mopSync = new MopSync(_session, _itemSync, Logger);
             _worldSync = new WorldSync(_session, Logger);
-            _orderSync = new OrderSync(_session, _itemSync, Logger);
+            _orderSync = new OrderSync(_session, _itemSync, Logger, _moreOrders);
             _timerSync = new TimerSync(_session, _itemSync, Logger);
             _breakSync = new BreakSync(_session, _itemSync, Logger);
             _stackSync = new StackSync(_session, Logger);
             _propSync = new PropSync(_session, Logger);
             _standSync = new StandSync(_session, Logger);
             _clockSync = new ClockSync(_session, Logger);
+            _careerSync = new CareerSync(_session, Logger);
+            _keepRunning = new KeepRunning(_session, Logger);
             _connectWindows = new ConnectWindows(_session, _hostAddress, _port);
             Logger.LogInfo($"{PluginName} {PluginVersion} loaded (process {NetSession.ProcessId}). " +
                            $"F10 = host on port {_port.Value} (from inside a kitchen), F11 = join from the main menu (asks for the address), F12 = disconnect, F9 (client) = cooking sync test, F8 = log marker.");
@@ -89,22 +98,44 @@ namespace CookingSimMP
             }
 
             _session.Poll();
-            _worldSync.Tick(Time.unscaledDeltaTime);
             // Unscaled so syncing keeps running while the game is paused.
-            _playerSync.Tick(Time.unscaledDeltaTime);
-            _itemSync.Tick(Time.unscaledDeltaTime);
-            _interactableSync.Tick(Time.unscaledDeltaTime);
-            _cookingSync.Tick(Time.unscaledDeltaTime);
-            _pauseSync.Tick(Time.unscaledDeltaTime);
-            _moneySync.Tick(Time.unscaledDeltaTime);
-            _orderSync.Tick(Time.unscaledDeltaTime);
-            _timerSync.Tick(Time.unscaledDeltaTime);
-            _contentsSync.Tick(Time.unscaledDeltaTime);
-            _cleaningSync.Tick(Time.unscaledDeltaTime);
-            _mopSync.Tick(Time.unscaledDeltaTime);
-            _stackSync.Tick(Time.unscaledDeltaTime);
-            _standSync.Tick(Time.unscaledDeltaTime);
-            _clockSync.Tick(Time.unscaledDeltaTime);
+            float dt = Time.unscaledDeltaTime;
+            Run("World", _worldSync.Tick, dt);
+            Run("Players", _playerSync.Tick, dt);
+            Run("Items", _itemSync.Tick, dt);
+            Run("Interactables", _interactableSync.Tick, dt);
+            Run("Cooking", _cookingSync.Tick, dt);
+            Run("Pause", _pauseSync.Tick, dt);
+            Run("Money", _moneySync.Tick, dt);
+            Run("Orders", _orderSync.Tick, dt);
+            Run("Timers", _timerSync.Tick, dt);
+            Run("Contents", _contentsSync.Tick, dt);
+            Run("Cleaning", _cleaningSync.Tick, dt);
+            Run("Mop", _mopSync.Tick, dt);
+            Run("Stacks", _stackSync.Tick, dt);
+            Run("Stands", _standSync.Tick, dt);
+            Run("Clock", _clockSync.Tick, dt);
+            Run("Career", _careerSync.Tick, dt);
+        }
+
+        // v0.11: one sync failing mustn't stop the rest for the frame, and the error has to reach LogOutput.log
+        // (Unity's exception log isn't written there). The same error is logged again at most every 10 seconds.
+        private readonly Dictionary<string, float> _lastTickError = new Dictionary<string, float>();
+
+        private void Run(string name, Action<float> tick, float dt)
+        {
+            try
+            {
+                tick(dt);
+            }
+            catch (Exception e)
+            {
+                string key = name + e.GetType().Name + e.Message;
+                if (_lastTickError.TryGetValue(key, out float at) && Time.realtimeSinceStartup - at < 10f)
+                    return;
+                _lastTickError[key] = Time.realtimeSinceStartup;
+                Logger.LogError($"[{name}] Update failed: {e}");
+            }
         }
 
         private void OnMarker(int peerId, MessageType type, LiteNetLib.NetPacketReader reader)
@@ -136,13 +167,16 @@ namespace CookingSimMP
             GUI.Label(rect, text, _versionStyle);
         }
 
-        private void LateUpdate() => _itemSync.LateTick(Time.unscaledDeltaTime);
+        private void LateUpdate() => Run("Items (late)", _itemSync.LateTick, Time.unscaledDeltaTime);
 
         private void OnGUI()
         {
             DrawVersionLabel();
+            _playerSync?.OnGUI();
             _pauseSync?.OnGUI();
             _worldSync?.OnGUI();
+            _orderSync?.OnGUI();
+            _careerSync?.OnGUI();
             _connectWindows?.OnGUI();
         }
 

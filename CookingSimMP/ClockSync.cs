@@ -157,7 +157,7 @@ namespace CookingSimMP
         // How far the client's clock may move on its own this tick (0 = hold until the host's next message).
         internal float LimitLocalTick(StandardTimeManager time, float seconds)
         {
-            if (!_hostKnown || _sinceHost > MaxAheadOfHost)
+            if (!_hostKnown || _sinceHost > MaxAheadOfHost || CareerSync.ClientWaitingForDay)
                 return 0f;
             DateTime next = DayRef(time).AddSeconds(seconds * time.TimeAcceleration);
             if (Constants.Me.GetDayPhaseOfTime(next.Hour) != _hostPhase
@@ -178,6 +178,10 @@ namespace CookingSimMP
 
             // While this copy runs its own end-of-day screens, leave its clock alone. Once the host's clock reaches
             // the end of the day, end it here once; the host keeps sending that time until its own next day starts.
+            // v0.11: the client no longer ends its day (CareerSync); it waits for the host's next day to arrive with
+            // the world, so the host's new morning mustn't be applied to this copy's old day.
+            if (CareerSync.ClientWaitingForDay)
+                return;
             if (Game.CurrentGameService?.DayFlow != null && Game.CurrentGameService.DayFlow.DuringNextDayCoroutine)
                 return;
             bool hostAtEnd = new TimeSpan(ticks).Hours >= Constants.Me.GetDayTypeTimeHour(DayTimeType.EndDay);

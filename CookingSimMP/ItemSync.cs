@@ -22,7 +22,7 @@ namespace CookingSimMP
     // Grab conflicts: an item the other player is holding (or carrying in a pan, plate or pot) can't be picked
     // up; the click does nothing and a short message says who has it. If both players grab the same item within
     // the network delay, the host wins and the client's copy drops it and follows the host.
-    internal sealed class ItemSync
+    internal sealed partial class ItemSync
     {
         private const float SendInterval = 0.05f;
         private const float SettleTime = 1f;          // After letting go, keep sending at least this long...
@@ -122,6 +122,7 @@ namespace CookingSimMP
             _log = log;
             _session.MessageReceived += OnMessage;
             PatchPick();
+            PatchLifecycle();
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
             _session.WorldReset += Reset;
@@ -169,6 +170,7 @@ namespace CookingSimMP
             }
 
             UpdateLocalTracks(deltaTime);
+            TickLifecycle(deltaTime);
             SendPendingSeats(deltaTime);
         }
 
@@ -232,6 +234,7 @@ namespace CookingSimMP
         public void LateTick(float deltaTime)
         {
             FollowRemotePoses(deltaTime);
+            CheckRestGuards(deltaTime);
         }
 
         // ---------- ID table ----------
@@ -397,6 +400,7 @@ namespace CookingSimMP
             _localTracks.Clear();
             _registryScene = null;
             _unknownInHand = null;
+            ResetLifecycle();
         }
 
         // Food bought onto a container: when to send where it settled in it (it's created just above and drops in).
@@ -458,6 +462,7 @@ namespace CookingSimMP
         {
             _byNetId[netId] = movable;
             _netIdOf[movable] = netId;
+            _cutPieces.Add(netId);
         }
 
         // The item is gone (cut into pieces). Stop following or sending it without telling the other copy,
@@ -615,7 +620,7 @@ namespace CookingSimMP
             IMovable m = _unknownInHand;
             _unknownInHand = null;
             if (IsAlive(m) && !_netIdOf.ContainsKey(m))
-                _log.LogWarning($"Picked up {m.GetType().Name} '{m.gameObject.name}' (asset {m.AssetId}), which isn't in the item table, so it won't sync.");
+                HandleUnknownItem(m);
         }
 
         // Start (or resume) sending an item's pose and tell the other copy to follow it.
@@ -670,10 +675,7 @@ namespace CookingSimMP
                 // The game removed it while we were in charge, e.g. a plate put back on its stack.
                 if (!IsAlive(track.Movable))
                 {
-                    _session.BeginMessage(MessageType.ItemRemoved).Put(netId);
-                    _session.SendToAll(DeliveryMethod.ReliableOrdered);
-                    _log.LogInfo($"Item {netId} was removed; told the other player.");
-                    ForgetItem(netId);
+                    SendRemoved(netId, "removed");
                     continue;
                 }
 
@@ -753,6 +755,7 @@ namespace CookingSimMP
         private void ForgetItem(int netId)
         {
             _localTracks.Remove(netId);
+            _goneHere.Add(netId);
             if (_byNetId.TryGetValue(netId, out IMovable m))
             {
                 _byNetId.Remove(netId);
@@ -1160,6 +1163,12 @@ namespace CookingSimMP
                 case MessageType.ItemRemoved:
                     OnRemoteRemoved(reader.GetInt());
                     break;
+                case MessageType.ItemMissing:
+                    OnItemMissing(reader.GetInt());
+                    break;
+                case MessageType.ItemRespawn:
+                    OnItemRespawn(reader);
+                    break;
                 default:
                     // Every other known message type belongs to one of the other syncs.
                     if (System.Enum.IsDefined(typeof(MessageType), type))
@@ -1228,10 +1237,22 @@ namespace CookingSimMP
                 ReleaseRemoteHeld(item, snap: false);
                 _remoteHeld.Remove(netId);
             }
-            if (_byNetId.TryGetValue(netId, out IMovable m) && IsAlive(m))
-                Singleton<ActionsManager>.Me.Remove(m);
+            bool known = _byNetId.TryGetValue(netId, out IMovable m) && IsAlive(m);
+            if (known)
+            {
+                try
+                {
+                    _applyingRemoval = true;
+                    Singleton<ActionsManager>.Me.Remove(m);
+                }
+                finally
+                {
+                    _applyingRemoval = false;
+                }
+            }
             ForgetItem(netId);
-            _log.LogInfo($"Other player removed item {netId}; removed it here too.");
+            if (known)
+                _log.LogInfo($"Other player removed item {netId}; removed it here too.");
         }
 
         // The other player served this plate: it left the kitchen on their copy, so it goes here too, with the food on it.
@@ -1242,24 +1263,40 @@ namespace CookingSimMP
                 _log.LogWarning($"Other player served plate {netId}, which this copy couldn't match.");
                 return;
             }
+            // Food sits on the plate as parts (GetPartsRecursive), not only as movables; both go.
             var parts = new List<IMovable>();
             if (plate is Container container)
-                parts.AddRange(container.MovablesRecursive);
-            parts.Add(plate);
-            foreach (IMovable part in parts)
             {
-                if (!IsAlive(part))
-                    continue;
-                if (_netIdOf.TryGetValue(part, out int partId))
+                parts.AddRange(container.MovablesRecursive);
+                foreach (ProductPart food in container.GetPartsRecursive())
                 {
-                    if (_remoteHeld.TryGetValue(partId, out RemoteHeldItem held))
-                    {
-                        ReleaseRemoteHeld(held, snap: false);
-                        _remoteHeld.Remove(partId);
-                    }
-                    ForgetItem(partId);
+                    if (!parts.Contains(food))
+                        parts.Add(food);
                 }
-                Singleton<ActionsManager>.Me.Remove(part);
+            }
+            parts.Add(plate);
+            try
+            {
+                _applyingRemoval = true;
+                foreach (IMovable part in parts)
+                {
+                    if (!IsAlive(part))
+                        continue;
+                    if (_netIdOf.TryGetValue(part, out int partId))
+                    {
+                        if (_remoteHeld.TryGetValue(partId, out RemoteHeldItem held))
+                        {
+                            ReleaseRemoteHeld(held, snap: false);
+                            _remoteHeld.Remove(partId);
+                        }
+                        ForgetItem(partId);
+                    }
+                    Singleton<ActionsManager>.Me.Remove(part);
+                }
+            }
+            finally
+            {
+                _applyingRemoval = false;
             }
             _log.LogInfo($"Other player served plate {netId}; removed it here ({parts.Count - 1} items on it).");
         }
@@ -1269,6 +1306,7 @@ namespace CookingSimMP
             if (!_byNetId.TryGetValue(netId, out IMovable m) || !IsAlive(m))
             {
                 _log.LogWarning($"Other player picked up item {netId}, which this copy couldn't match.");
+                RequestMissing(netId);
                 return;
             }
             if (_remoteHeld.ContainsKey(netId))
@@ -1352,7 +1390,26 @@ namespace CookingSimMP
 
             // A late pose can arrive after the drop; ignore it.
             if (!_remoteHeld.TryGetValue(netId, out RemoteHeldItem item))
+            {
+                // Moved by the other player but missing here: ask for it.
+                if (!TryGetItem(netId, out _))
+                    RequestMissing(netId);
                 return;
+            }
+            // Died here while they hold it (the spatula fell out of the kitchen on this copy): get it back.
+            if (!IsAlive(item.Movable) || item.Main == null)
+            {
+                ReleaseRemoteHeld(item, snap: false);
+                _remoteHeld.Remove(netId);
+                _log.LogWarning($"Item {netId} vanished here while the other player was holding it; asking them for it.");
+                if (_byNetId.TryGetValue(netId, out IMovable dead))
+                {
+                    _byNetId.Remove(netId);
+                    _netIdOf.Remove(dead);
+                }
+                RequestMissing(netId);
+                return;
+            }
 
             item.TargetPosition = position;
             item.TargetRotation = rotation;
@@ -1390,6 +1447,11 @@ namespace CookingSimMP
                     }
                 }
                 _remoteHeld.Remove(netId);
+                if (!endKinematic)
+                {
+                    Transform root = item.Movable.gameObject.transform;
+                    GuardRest(item.Movable, position, rotation, new Pose(root.position, root.rotation));
+                }
                 _log.LogInfo($"Other player let go of item {netId}.");
             }
         }
@@ -1399,7 +1461,10 @@ namespace CookingSimMP
             List<string> boneNames, List<Pose> bonePoses, List<bool> boneKinematic, List<bool> boneDetached)
         {
             if (!_byNetId.TryGetValue(netId, out IMovable m) || !IsAlive(m))
+            {
+                RequestMissing(netId);
                 return;
+            }
             Rigidbody main = MainBodyOf(m);
             // Still followed on its own, or still riding something else they hold: those finish it off.
             if (_remoteHeld.ContainsKey(netId) || IsFrozen(main))
@@ -1425,6 +1490,8 @@ namespace CookingSimMP
                 }
             }
             RestoreBody(main, kinematic);
+            if (!kinematic)
+                GuardRest(m, position, rotation, rootPose);
         }
 
         // Safety net: only move bones if both copies list the same bones in the same order.

@@ -178,6 +178,24 @@ v0.10.2 fix: a bottle poured by one player no longer pours on the other player's
 
 See `v0.10-testing.md` for the full test plan.
 
+## v0.11 additions
+
+- **Items removed by the game** (trash bin, a plate put back on its stack, food blended into a mixture) go on both screens, not only items touched in the last minute. Served plates take all their food with them on the other screen.
+- **Items that vanish on one screen only** (fell through the counter there) come back: the copy that lost one asks the other player for it as soon as it's used again. Food or tools the other player put down are held in place for a few seconds if they start to fall through.
+- **Spatula:** food lifted, flipped or pushed with a spatula moves on the other screen too.
+- **Duplicate tools:** a second hand blender (or other tool) that only exists on one screen is removed when picked up, with a notice.
+- **More orders with two players:** the kitchen takes 1.5x the orders at once while a client is connected (another 0.5x per extra player). The host turns it on or off with the button under RESYNC in the pause menu; it's on by default and saved in the config file (`MoreOrdersWithMorePlayers`).
+- **Career:** the client no longer runs its own end of day. It waits behind "The host is wrapping up the day" and then reloads the host's next day. Once-per-day perks are used up for both players, and reroll, reset dish time and extra time run on the host when the client uses them. Bankruptcy comes from the host. If the host leaves, the client goes back to the main menu.
+- **Errors:** an error in any sync is now written to `LogOutput.log` (Unity's own error log isn't), and one failing sync no longer stops the others.
+
+v0.11.1: other players now appear as a chef in their own colour, with walking arms and legs. If the chef can't be built, the old blue blob shows instead and the log says `[CSMP] Couldn't build the chef model`.
+
+v0.11.2: a mixture the client blends shows in the host's pot (it was only in the tooltip); the spatula and other items the other player puts down no longer bounce or sink (they're held in place at once); the score window after serving, the dish analyzer and the kitchen computer no longer pause the game for everyone; the host's chef is red and clients are blue, then green.
+
+v0.11.3: each other player's chef has a name tag above it with their Steam name ("Player" if they have none), in their chef colour.
+
+See `v0.11-testing.md` for the v0.11 test plan.
+
 | Key | Action |
 |---|---|
 | F10 | Open the host window from inside a kitchen (lists your addresses; Host or Cancel) |
