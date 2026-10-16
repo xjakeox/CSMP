@@ -9,7 +9,7 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "com.jake.cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.9.8";
+        public const string PluginVersion = "0.10.2";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
@@ -28,6 +28,10 @@ namespace CookingSimMP
         private OrderSync _orderSync;
         private TimerSync _timerSync;
         private BreakSync _breakSync;
+        private StackSync _stackSync;
+        private PropSync _propSync;
+        private StandSync _standSync;
+        private ClockSync _clockSync;
         private ConnectWindows _connectWindows;
         private int _marker;
 
@@ -57,6 +61,10 @@ namespace CookingSimMP
             _orderSync = new OrderSync(_session, _itemSync, Logger);
             _timerSync = new TimerSync(_session, _itemSync, Logger);
             _breakSync = new BreakSync(_session, _itemSync, Logger);
+            _stackSync = new StackSync(_session, Logger);
+            _propSync = new PropSync(_session, Logger);
+            _standSync = new StandSync(_session, Logger);
+            _clockSync = new ClockSync(_session, Logger);
             _connectWindows = new ConnectWindows(_session, _hostAddress, _port);
             Logger.LogInfo($"{PluginName} {PluginVersion} loaded (process {NetSession.ProcessId}). " +
                            $"F10 = host on port {_port.Value} (from inside a kitchen), F11 = join from the main menu (asks for the address), F12 = disconnect, F9 (client) = cooking sync test, F8 = log marker.");
@@ -94,6 +102,9 @@ namespace CookingSimMP
             _contentsSync.Tick(Time.unscaledDeltaTime);
             _cleaningSync.Tick(Time.unscaledDeltaTime);
             _mopSync.Tick(Time.unscaledDeltaTime);
+            _stackSync.Tick(Time.unscaledDeltaTime);
+            _standSync.Tick(Time.unscaledDeltaTime);
+            _clockSync.Tick(Time.unscaledDeltaTime);
         }
 
         private void OnMarker(int peerId, MessageType type, LiteNetLib.NetPacketReader reader)

@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using BepInEx.Logging;
 using HarmonyLib;
 using LiteNetLib;
 using LiteNetLib.Utils;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace CookingSimMP
 {
@@ -11,6 +14,10 @@ namespace CookingSimMP
     // breaks tells the other one, which moves the item to the same spot and breaks it the same way, so the shards,
     // the sound and the food that falls off happen on both screens. An item the other player is holding or throwing
     // only breaks when their copy says so; this copy just follows it.
+    //
+    // Broken pieces aren't in the game's save, so a client loading the host's world (joining, or RESYNC) has none.
+    // Each copy remembers which item every piece came from; after the item table the host sends where its pieces
+    // are, and the client rebuilds them from a fresh copy of the same item (v0.10.1).
     internal sealed class BreakSync
     {
         internal static BreakSync Instance;
@@ -26,6 +33,18 @@ namespace CookingSimMP
         private readonly ItemSync _items;
         private readonly ManualLogSource _log;
         private readonly Harmony _harmony = new Harmony(Plugin.PluginGuid + ".breaks");
+
+        // Where each broken piece came from: which item, which break, and which piece of that item's shards.
+        private struct PieceOrigin
+        {
+            public ItemSync.SpawnKind Kind;
+            public int AssetId;
+            public int BreakNo;
+            public int Index;
+        }
+
+        private static readonly Dictionary<FracturedDummyMovable, PieceOrigin> Origins = new Dictionary<FracturedDummyMovable, PieceOrigin>();
+        private static int _breakNo;
 
         public BreakSync(NetSession session, ItemSync items, ManualLogSource log)
         {
@@ -45,9 +64,144 @@ namespace CookingSimMP
             {
                 _log.LogError($"[Breaks] Patching MovablePhysics.Break failed; breaking isn't synced: {e}");
             }
+            try
+            {
+                _harmony.Patch(AccessTools.Method(typeof(FracturedObjectsService), nameof(FracturedObjectsService.SetFracturedObject)),
+                    prefix: new HarmonyMethod(typeof(BreakPatches), nameof(BreakPatches.ShatterPrefix)));
+            }
+            catch (Exception e)
+            {
+                _log.LogError($"[Breaks] Patching FracturedObjectsService.SetFracturedObject failed; broken pieces won't be rebuilt after RESYNC: {e}");
+            }
         }
 
-        public static bool Handles(MessageType type) => type == MessageType.ItemBroken;
+        public static bool Handles(MessageType type) => type == MessageType.ItemBroken || type == MessageType.PieceList;
+
+        // ---------- Broken pieces ----------
+
+        // An item is about to shatter into its pieces (still children of its shards object, in a fixed order).
+        internal static void RememberPieces(GameObject fracturedObject, GameObject parentObject)
+        {
+            if (fracturedObject == null || parentObject == null)
+                return;
+            IMovable parent = parentObject.GetComponent<IMovable>();
+            if (parent == null || !ItemSync.TryGetSpawnKind(parent, out ItemSync.SpawnKind kind))
+                return;
+            FracturedDummyMovable[] pieces = fracturedObject.GetComponentsInChildren<FracturedDummyMovable>(true);
+            if (pieces.Length == 0)
+                return;
+            int breakNo = ++_breakNo;
+            foreach (KeyValuePair<FracturedDummyMovable, PieceOrigin> dead in Origins.Where(o => o.Key == null).ToList())
+                Origins.Remove(dead.Key);
+            for (int i = 0; i < pieces.Length; i++)
+                Origins[pieces[i]] = new PieceOrigin { Kind = kind, AssetId = parent.AssetId, BreakNo = breakNo, Index = i };
+        }
+
+        // Host, right after the item table: every piece in it that this copy knows the origin of.
+        internal void SendPieces(Dictionary<IMovable, int> netIds)
+        {
+            var list = new List<KeyValuePair<int, FracturedDummyMovable>>();
+            foreach (KeyValuePair<FracturedDummyMovable, PieceOrigin> pair in Origins)
+            {
+                if (pair.Key != null && netIds.TryGetValue(pair.Key, out int netId))
+                    list.Add(new KeyValuePair<int, FracturedDummyMovable>(netId, pair.Key));
+            }
+            if (list.Count == 0)
+                return;
+            NetDataWriter writer = _session.BeginMessage(MessageType.PieceList);
+            writer.Put(list.Count);
+            foreach (KeyValuePair<int, FracturedDummyMovable> pair in list)
+            {
+                PieceOrigin o = Origins[pair.Value];
+                Transform t = pair.Value.transform;
+                writer.Put(pair.Key);
+                writer.Put((byte)o.Kind);
+                writer.Put(o.AssetId);
+                writer.Put(o.BreakNo);
+                writer.Put(o.Index);
+                writer.Put(t.position.x); writer.Put(t.position.y); writer.Put(t.position.z);
+                writer.Put(t.rotation.x); writer.Put(t.rotation.y); writer.Put(t.rotation.z); writer.Put(t.rotation.w);
+            }
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _log.LogInfo($"[Breaks] Sent {list.Count} broken piece(s) for the other player to rebuild.");
+        }
+
+        private struct PieceEntry
+        {
+            public int NetId;
+            public ItemSync.SpawnKind Kind;
+            public int AssetId;
+            public int BreakNo;
+            public int Index;
+            public Vector3 Position;
+            public Quaternion Rotation;
+        }
+
+        // Client: rebuild the host's pieces. One fresh copy of the broken item per break gives its shards; the
+        // pieces needed are taken out of them and placed where the host has them, and the copy is thrown away.
+        private void OnPieces(NetPacketReader reader)
+        {
+            int count = reader.GetInt();
+            var entries = new List<PieceEntry>();
+            for (int i = 0; i < count; i++)
+            {
+                entries.Add(new PieceEntry
+                {
+                    NetId = reader.GetInt(),
+                    Kind = (ItemSync.SpawnKind)reader.GetByte(),
+                    AssetId = reader.GetInt(),
+                    BreakNo = reader.GetInt(),
+                    Index = reader.GetInt(),
+                    Position = new Vector3(reader.GetFloat(), reader.GetFloat(), reader.GetFloat()),
+                    Rotation = new Quaternion(reader.GetFloat(), reader.GetFloat(), reader.GetFloat(), reader.GetFloat()),
+                });
+            }
+            int rebuilt = 0;
+            int failed = 0;
+            foreach (IGrouping<int, PieceEntry> group in entries.Where(e => !_items.TryGetItem(e.NetId, out _)).GroupBy(e => e.BreakNo))
+            {
+                PieceEntry first = group.First();
+                IMovable copy = null;
+                try
+                {
+                    copy = ItemSync.CreateCopy(first.Kind, first.AssetId, first.Position + Vector3.up * 50f, Quaternion.identity, Vector3.one);
+                    GameObject shards = copy?.PhysicsController != null ? copy.PhysicsController.FracturedObject : null;
+                    if (shards == null)
+                    {
+                        failed += group.Count();
+                        continue;
+                    }
+                    FracturedDummyMovable[] pieces = shards.GetComponentsInChildren<FracturedDummyMovable>(true);
+                    foreach (PieceEntry e in group)
+                    {
+                        if (e.Index < 0 || e.Index >= pieces.Length || pieces[e.Index] == null)
+                        {
+                            failed++;
+                            continue;
+                        }
+                        FracturedDummyMovable piece = pieces[e.Index];
+                        piece.transform.SetParent(null, true);
+                        piece.transform.SetPositionAndRotation(e.Position, e.Rotation);
+                        piece.gameObject.SetActive(true);
+                        Origins[piece] = new PieceOrigin { Kind = e.Kind, AssetId = e.AssetId, BreakNo = e.BreakNo, Index = e.Index };
+                        Game.KitchenServices.FracturedObjects.AddFracturedObject(piece.gameObject);
+                        _items.Bind(e.NetId, piece);
+                        rebuilt++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failed += group.Count();
+                    _log.LogWarning($"[Breaks] Rebuilding the pieces of a broken {first.Kind} (asset {first.AssetId}) failed: {ex.Message}");
+                }
+                finally
+                {
+                    if (copy is Object obj && obj != null)
+                        Object.Destroy(copy.gameObject);
+                }
+            }
+            _log.LogInfo($"[Breaks] Rebuilt {rebuilt} of the host's broken pieces here" + (failed > 0 ? $" ({failed} couldn't be rebuilt)." : "."));
+        }
 
         private bool Active => _session.IsConnected && WorldSync.InKitchen;
 
@@ -114,10 +268,16 @@ namespace CookingSimMP
 
         private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
         {
-            if (type != MessageType.ItemBroken || !Active)
+            if (!Handles(type) || !Active)
                 return;
             try
             {
+                if (type == MessageType.PieceList)
+                {
+                    if (!_session.IsHost)
+                        OnPieces(reader);
+                    return;
+                }
                 OnRemoteBroken(reader);
             }
             catch (Exception e)
@@ -129,6 +289,18 @@ namespace CookingSimMP
 
     internal static class BreakPatches
     {
+        public static void ShatterPrefix(GameObject fracturedObject, GameObject parentObject)
+        {
+            try
+            {
+                BreakSync.RememberPieces(fracturedObject, parentObject);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Breaks] patch error: " + e);
+            }
+        }
+
         public static bool BreakPrefix(MovablePhysics __instance, string breakSound, float strength)
         {
             try

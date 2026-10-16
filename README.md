@@ -123,7 +123,8 @@ Both players share one wallet, kept by the host. Buying, dish payments, tips, re
 3. Buy a plate, a tool and some food in the client. Again the money goes down once, on both screens.
 4. Buy something in both copies at nearly the same moment. Both screens should end on the same amount.
 5. Serve a dish in either copy. The payment and tip show up on both screens.
-6. Known gap: putting a plate back on its stack makes the next plate free only on that player's screen, so the other player still pays for theirs (TODO #5).
+6. Put a plate back on its stack in one copy, then take a plate in the other. It's free there (v0.10).
+7. Call a repair with the phone in either copy. The cost comes out of the shared wallet once.
 
 ## Test cutting and pan contents (v0.8)
 
@@ -138,7 +139,7 @@ Cutting food on one copy cuts it the same way on the other, and whatever goes in
 7. Salt a steak in one copy. Hovering over it in the other copy should show the same seasoning. Fry it in the oiled pan; its doneness should match on both.
 8. Problems show up as `[Cut]` or `[Contents]` warnings.
 
-Known gaps: the hand blender, how full bottles and shakers are, and the pizza, sushi and Cooking Ninja cuts are untested. If both players pour into the same pot at the same moment, one of the pours can be lost (TODO #4).
+How full bottles and shakers are, and whether a bottle's cap is on, sync too (v0.10). When both players pour into the same pot at once, the host adds both pours together, so neither is lost (v0.10). Known gaps: the hand blender and the pizza, sushi and Cooking Ninja cuts are untested.
 
 ## Test dirt and cleaning (v0.8)
 
@@ -148,7 +149,7 @@ Stains (spills, splashes, broken eggs) and cleaning them with the sponge or mop 
 2. In the client, spill some oil or water on a counter, or tilt a full pot until it spills. The same stain should appear in the host.
 3. In the host, pick up the sponge and clean half of that stain. The client should see the same half cleaned. Then finish it from the client.
 4. Spill something on the floor and clean it with the mop from the other copy. The other copy should see the mop head slide across the floor with the stick pointing up to the player's hand (v0.8.1), and can't grab the mop while it's in use.
-5. Break an egg. It breaks on both copies by itself, so its stain gets painted twice and may look a little darker. Cleaning it once should still clear it on both.
+5. Break an egg. It breaks on both copies by itself; from v0.10 its stain is painted once, so it's no darker than with the mod off. Cleaning it once clears it on both.
 6. Problems show up as `[Clean]` warnings.
 
 ## Test grab conflicts (v0.8)
@@ -161,6 +162,21 @@ Something the other player is holding can't be taken out of their hands.
 4. Drop the plate in the host. The client can pick it up right away.
 5. Both click the same plate at the same moment (count down out loud). The host should end up with it. If the client grabbed it too, the client's copy drops it straight away and shows "<host name> grabbed that first".
 
+
+## v0.10 additions
+
+- **RESYNC:** the host's pause menu has a RESYNC button in the top right corner while someone is connected. Every client reloads the host's world in place.
+- **Connection errors** show in a window with the reason (and Try again from the main menu), not only in the log.
+- **Breakables:** windows, shelves, the TV, lamps, lights, the fan and the power box break and get fixed on both screens.
+- **Appliance wear and repairs:** the host runs wear and breakdowns, the client copies each appliance's condition, and a phone repair started by either player runs on both. Problems show up as `[Stands]` and `[Props]` warnings.
+- **Day clock:** the client follows the host's time and phase. The client's TV skip buttons ask the host ("<name> is asking to skip ahead"). Problems show up as `[Clock]` warnings.
+- **Serving:** the first player to check out an order gets it; the other sees "<name> is serving that order" and keeps the plate. A dish either player serves counts in both copies' recipe history and cooking points (so in the host's save), and both get the achievement progress.
+
+v0.10.1 fixes: the TV's cracked screen syncs (the first knock cracks it, the second breaks it), broken pieces are rebuilt on the client after joining or RESYNC (the game doesn't save them), and bottle amounts match to the ml after a pour.
+
+v0.10.2 fix: a bottle poured by one player no longer pours on the other player's copy too (which doubled what went into the pot). The other player still sees the stream.
+
+See `v0.10-testing.md` for the full test plan.
 
 | Key | Action |
 |---|---|

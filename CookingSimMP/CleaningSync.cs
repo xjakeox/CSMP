@@ -21,13 +21,17 @@ namespace CookingSimMP
     // Each stroke is sent as (where it hit, which direction, which brush, colour). The other copy casts a short ray
     // at the same spot and paints the same stroke through the same method, so the mask changes the same way.
     //
-    // Stains from things that happen on both copies anyway (an egg breaking, butter melting) get painted twice,
-    // once locally and once from the other copy. They land in nearly the same spot, so that only darkens the stain
-    // a little; cleaning it once still clears it on both.
+    // Stains from things that happen on both copies anyway (an egg breaking, butter melting) would get painted twice,
+    // once locally and once from the other copy, which made them darker (v0.10 fix). Each copy remembers its own
+    // recent strokes and the other player's; a stroke with the same brush in nearly the same spot within a few
+    // seconds of one already painted from the other side is the same stain, so it's painted only once.
     internal sealed class CleaningSync
     {
         private const float SendInterval = 0.05f;
         private const int MaxStrokesPerMessage = 200;
+        private const float SameStainDistance = 0.06f;  // Metres between two strokes that count as the same stain...
+        private const float SameStainTime = 3f;         // ...when painted this close together in time (seconds).
+        private const int MaxRemembered = 256;
 
         private static CleaningSync _instance;
 
@@ -43,6 +47,18 @@ namespace CookingSimMP
         private readonly Dictionary<string, BrushData> _brushes = new Dictionary<string, BrushData>();
         private readonly HashSet<string> _warnedBrush = new HashSet<string>();
         private float _sendTimer;
+        private float _clock;
+
+        // Recent strokes painted here by this copy, and recent ones replayed from the other copy.
+        private readonly List<Remembered> _recentLocal = new List<Remembered>();
+        private readonly List<Remembered> _recentRemote = new List<Remembered>();
+
+        private struct Remembered
+        {
+            public string Brush;
+            public Vector3 Point;
+            public float Time;
+        }
 
         private struct Stroke
         {
@@ -88,6 +104,35 @@ namespace CookingSimMP
             _pending.Clear();
             _brushes.Clear();
             _warnedBrush.Clear();
+            _recentLocal.Clear();
+            _recentRemote.Clear();
+        }
+
+        // Finds (and uses up) a remembered stroke that is the same stain as this one.
+        private bool TakeSameStain(List<Remembered> list, string brush, Vector3 point)
+        {
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                Remembered r = list[i];
+                if (_clock - r.Time > SameStainTime)
+                {
+                    list.RemoveRange(0, i + 1);
+                    return false;
+                }
+                if (r.Brush == brush && (r.Point - point).sqrMagnitude < SameStainDistance * SameStainDistance)
+                {
+                    list.RemoveAt(i);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void Remember(List<Remembered> list, string brush, Vector3 point)
+        {
+            list.Add(new Remembered { Brush = brush, Point = point, Time = _clock });
+            if (list.Count > MaxRemembered)
+                list.RemoveAt(0);
         }
 
         // Runtime copies of a brush (a spill tinted to the liquid's colour) are named "<asset>(Clone)".
@@ -100,16 +145,22 @@ namespace CookingSimMP
 
         // ---------- Local stroke: queue it ----------
 
-        private void OnLocalPaint(PaintInfoData info)
+        // Returns false when this stroke was already painted here from the other copy (the same stain).
+        private bool OnLocalPaint(PaintInfoData info)
         {
             if (_replaying || !Active || info == null || info.BrushData == null)
-                return;
+                return true;
             RaycastHit hit = info.RaycastHit;
             if (hit.collider == null || !(hit.collider is MeshCollider))
-                return;
+                return true;
             PaintData target = hit.collider.GetComponent<PaintData>();
             if (target == null || !target.IsPaintingEnabled)
-                return;
+                return true;
+
+            string brushName = BrushName(info.BrushData);
+            if (TakeSameStain(_recentRemote, brushName, hit.point))
+                return false;
+            Remember(_recentLocal, brushName, hit.point);
 
             Vector3 direction = info.Direction.sqrMagnitude > 1e-8f ? info.Direction.normalized : -hit.normal;
             _pending.Add(new Stroke
@@ -117,17 +168,19 @@ namespace CookingSimMP
                 Point = hit.point,
                 Direction = direction,
                 Layer = hit.collider.gameObject.layer,
-                Brush = BrushName(info.BrushData),
+                Brush = brushName,
                 BrushColor = info.BrushData.BrushColor,
                 HasColor = info.Color.HasValue,
                 Color = info.Color ?? Color.white,
                 HasSpecificId = info.SpecificIdFeasibleToPaint.HasValue,
                 SpecificId = info.SpecificIdFeasibleToPaint ?? 0,
             });
+            return true;
         }
 
         public void Tick(float deltaTime)
         {
+            _clock += deltaTime;
             if (!Active)
             {
                 _pending.Clear();
@@ -209,6 +262,10 @@ namespace CookingSimMP
 
         private void Replay(Stroke s)
         {
+            // This copy already painted the same stain itself (an egg that broke on both copies).
+            if (TakeSameStain(_recentLocal, s.Brush, s.Point))
+                return;
+            Remember(_recentRemote, s.Brush, s.Point);
             BrushData asset = FindBrush(s.Brush);
             if (asset == null)
                 return;
@@ -262,15 +319,16 @@ namespace CookingSimMP
 
         // ---------- Harmony ----------
 
-        private static void PaintPrefix(PaintInfoData paintInfoData)
+        private static bool PaintPrefix(PaintInfoData paintInfoData)
         {
             try
             {
-                _instance?.OnLocalPaint(paintInfoData);
+                return _instance == null || _instance.OnLocalPaint(paintInfoData);
             }
             catch (Exception e)
             {
                 Debug.LogError("[CookingSimMP] [Clean] patch error: " + e);
+                return true;
             }
         }
     }

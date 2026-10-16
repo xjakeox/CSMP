@@ -9,9 +9,12 @@ namespace CookingSimMP
 {
     // F10 opens a "start hosting?" window listing the addresses others can join with; F11 opens a window
     // to type the host's address. Both free the mouse and block the game's clicks while open.
+    //
+    // When connecting fails or the connection is lost, an error window says why (v0.10), with Try again (back to
+    // the join window) where that makes sense.
     internal sealed class ConnectWindows
     {
-        private enum Window { None, Host, Join }
+        private enum Window { None, Host, Join, Error }
 
         private const float Width = 520f;
 
@@ -24,6 +27,9 @@ namespace CookingSimMP
         private string _error;
         private List<string> _addresses = new List<string>();
         private bool _focusField;
+        private string _errorTitle;
+        private string _errorText;
+        private bool _errorCanRetry;
 
         // Game input state saved while a window is open.
         private bool _savedLocked;
@@ -42,6 +48,21 @@ namespace CookingSimMP
             _session = session;
             _hostAddress = hostAddress;
             _port = port;
+            _session.ConnectProblem += ShowError;
+        }
+
+        // A connection problem goes on screen; it replaces the host or join window if one is open.
+        private void ShowError(string title, string text, bool canRetry)
+        {
+            _errorTitle = title;
+            _errorText = text;
+            _errorCanRetry = canRetry;
+            if (_open == Window.None)
+            {
+                AnyOpen = true;
+                BlockGameInput();
+            }
+            _open = Window.Error;
         }
 
         public void Tick()
@@ -231,7 +252,9 @@ namespace CookingSimMP
                 if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
                 {
                     e.Use();
-                    if (_open == Window.Host && WorldSync.HostInKitchen)
+                    if (_open == Window.Error)
+                        Close();
+                    else if (_open == Window.Host && WorldSync.HostInKitchen)
                         StartHosting();
                     else if (_open == Window.Host)
                         Close();
@@ -241,7 +264,9 @@ namespace CookingSimMP
                 }
             }
 
-            float height = _open == Window.Host ? 200f + 26f * Math.Max(1, _addresses.Count) : 260f;
+            float height = _open == Window.Host ? 200f + 26f * Math.Max(1, _addresses.Count)
+                : _open == Window.Error ? 130f + _labelStyle.CalcHeight(new GUIContent(_errorText ?? ""), Width - 40f)
+                : 260f;
             var rect = new Rect(Screen.width / 2f - Width / 2f, Screen.height / 2f - height / 2f, Width, height);
             // Drawn twice so IMGUI's translucent box is dark enough to read over the kitchen.
             GUI.Box(rect, GUIContent.none, _windowStyle);
@@ -249,6 +274,8 @@ namespace CookingSimMP
             GUILayout.BeginArea(new Rect(rect.x + 20f, rect.y + 16f, rect.width - 40f, rect.height - 32f));
             if (_open == Window.Host)
                 DrawHost();
+            else if (_open == Window.Error)
+                DrawError();
             else
                 DrawJoin();
             GUILayout.EndArea();
@@ -282,6 +309,27 @@ namespace CookingSimMP
             if (GUILayout.Button("Host", _buttonStyle, GUILayout.Width(120f)))
                 StartHosting();
             if (GUILayout.Button("Cancel", _buttonStyle, GUILayout.Width(120f)))
+                Close();
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawError()
+        {
+            GUILayout.Label(_errorTitle ?? "Connection problem", _labelStyle);
+            GUILayout.Label(_errorText ?? "", _labelStyle);
+            GUILayout.FlexibleSpace();
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            // Joining happens from the main menu, so Try again only shows there (and when it isn't hosting).
+            if (_errorCanRetry && !_session.IsRunning && !GameManager.DuringGame
+                && GUILayout.Button("Try again", _buttonStyle, GUILayout.Width(120f)))
+            {
+                _open = Window.Join;
+                _error = null;
+                _joinText = _hostAddress.Value;
+                _focusField = true;
+            }
+            if (GUILayout.Button("OK", _buttonStyle, GUILayout.Width(120f)))
                 Close();
             GUILayout.EndHorizontal();
         }

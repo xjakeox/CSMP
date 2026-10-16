@@ -35,7 +35,7 @@ namespace CookingSimMP
         private const float SmoothingSpeed = 20f;
 
         // What the other copy has to create when someone buys an item.
-        private enum SpawnKind : byte
+        internal enum SpawnKind : byte
         {
             Container = 1,
             Tool = 2,
@@ -290,6 +290,9 @@ namespace CookingSimMP
             _session.SendToAll(DeliveryMethod.ReliableOrdered);
             _log.LogInfo($"Sent item table: {movables.Count} items of {typeNames.Count} types in {scene}.");
 
+            // Broken pieces aren't in the world save, so the client's copy has none; it rebuilds them from this list.
+            BreakSync.Instance?.SendPieces(_netIdOf);
+
             // Something already in the host's hand (held while the client joined) keeps syncing.
             if (Player.Me != null && Player.Me.ActiveMovable is IMovable held && IsAlive(held) && _netIdOf.ContainsKey(held))
                 OnLocalHandChanged(held, false);
@@ -378,7 +381,12 @@ namespace CookingSimMP
 
             _log.LogInfo($"Matched {matched} of {count} host items, {matchedById} by saved ID ({localTotal - matched} local items unmatched).");
             foreach (KeyValuePair<string, int> pair in missedByType)
-                _log.LogWarning($"  Couldn't match {pair.Value} host item(s) of type {pair.Key}.");
+            {
+                if (pair.Key == nameof(FracturedDummyMovable))
+                    _log.LogInfo($"  {pair.Value} broken piece(s) on the host aren't in the save; rebuilding them here next.");
+                else
+                    _log.LogWarning($"  Couldn't match {pair.Value} host item(s) of type {pair.Key}.");
+            }
         }
 
         private void ClearTable()
@@ -424,6 +432,13 @@ namespace CookingSimMP
         public bool HasTable => _registryScene != null && _registryScene == SceneManager.GetActiveScene().name;
 
         public bool TryGetNetId(IMovable movable, out int netId) => _netIdOf.TryGetValue(movable, out netId);
+
+        // Gives an item this copy just rebuilt (a broken piece) the host's ID for it.
+        internal void Bind(int netId, IMovable movable)
+        {
+            _byNetId[netId] = movable;
+            _netIdOf[movable] = netId;
+        }
 
         public bool TryGetItem(int netId, out IMovable movable) =>
             _byNetId.TryGetValue(netId, out movable) && IsAlive(movable);
@@ -1036,7 +1051,7 @@ namespace CookingSimMP
             return null;
         }
 
-        private static bool TryGetSpawnKind(IMovable movable, out SpawnKind kind)
+        internal static bool TryGetSpawnKind(IMovable movable, out SpawnKind kind)
         {
             switch (movable)
             {
@@ -1059,7 +1074,7 @@ namespace CookingSimMP
         }
 
         // Creates the same kind of item the game would, with pay: false so only the buyer is charged.
-        private static IMovable CreateCopy(SpawnKind kind, int assetId, Vector3 position, Quaternion rotation, Vector3 scale)
+        internal static IMovable CreateCopy(SpawnKind kind, int assetId, Vector3 position, Quaternion rotation, Vector3 scale)
         {
             IObjectsFactoryService factory = Game.KitchenServices.ObjectsFactory;
             switch (kind)
@@ -1146,9 +1161,8 @@ namespace CookingSimMP
                     OnRemoteRemoved(reader.GetInt());
                     break;
                 default:
-                    // Door, cooking, pause, money, cut, contents and cleaning messages belong to the other syncs.
-                    if (WorldSync.Handles(type) || InteractableSync.Handles(type) || CookingSync.Handles(type) || PauseSync.Handles(type) || MoneySync.Handles(type)
-                        || CutSync.Handles(type) || ContentsSync.Handles(type) || CleaningSync.Handles(type) || MopSync.Handles(type) || OrderSync.Handles(type) || TimerSync.Handles(type) || BreakSync.Handles(type) || type == MessageType.LogMarker)
+                    // Every other known message type belongs to one of the other syncs.
+                    if (System.Enum.IsDefined(typeof(MessageType), type))
                         break;
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
                     break;

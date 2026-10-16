@@ -51,6 +51,18 @@ namespace CookingSimMP
         TimerRequest = 37,     // Client -> host: "I set, cancelled or silenced this kitchen timer."
         ItemBroken = 38,       // Either way: "This item broke here", with where it was, so the other copy breaks it too.
         ItemSeated = 39,       // Either way: where a just-bought item settled inside the container it was bought into.
+        ContentsAdd = 40,      // Client -> host: "I poured this much of this into these pots"; the host merges it (v0.10).
+        StackCount = 41,       // Either way: "This stack now holds this many put-back items" (free next pick-up).
+        DayClock = 42,         // Host -> client: the day's time and phase, once a second and on every change.
+        SkipRequest = 43,      // Client -> host: "<name> is asking to skip ahead" (TV skip buttons).
+        OrderClaim = 44,       // Either way: "I started (or stopped) checking out this order."
+        ServeScored = 45,      // Client -> host: "I served this order; count it in your save" (recipe history, cooking points).
+        StandState = 46,       // Host -> client: condition, broken and repair state of appliances and breakables that changed.
+        StandHit = 47,         // Client -> host: "This appliance took this much damage from a knock here."
+        RepairStart = 48,      // Either way: "I called a repair for this appliance with this company."
+        RepairStop = 49,       // Either way: "I stopped the repair of this appliance."
+        PropBroken = 50,       // Either way: "This window, shelf, TV or lamp broke (or cracked, or was fixed) here."
+        PieceList = 51,        // Host -> client, after the item table: every broken piece lying around, to rebuild (v0.10.1).
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
@@ -66,6 +78,9 @@ namespace CookingSimMP
         private readonly NetDataWriter _writer = new NetDataWriter();
         private bool _isHost;
         private bool _stopAfterPoll;
+        private bool _verified;          // Client: the host answered our hello with the same version.
+        private string _joinTarget;      // Client: "address:port" we're connecting to, for error messages.
+        private bool _problemShown;      // Client: a clearer reason is already on screen; don't replace it with the disconnect.
         private readonly Dictionary<int, NetPeer> _peers = new Dictionary<int, NetPeer>();
 
         public event Action<int, PlayerState> PlayerStateReceived;
@@ -78,6 +93,9 @@ namespace CookingSimMP
         // While a peer is loading a new world, its messages about the old one are dropped. Set by WorldSync.
         public Func<int, MessageType, bool> DropMessage;
         public event Action Stopped;
+        // Connecting failed, or the connection was lost: (title, explanation, whether "Try again" makes sense).
+        // ConnectWindows shows it on screen (v0.10); before, most of these were only in the log.
+        public event Action<string, string, bool> ConnectProblem;
         // Every message type NetSession doesn't handle itself goes here.
         public event Action<int, MessageType, NetPacketReader> MessageReceived;
 
@@ -117,6 +135,8 @@ namespace CookingSimMP
             if (!_net.Start(port))
             {
                 _log.LogError($"Could not open UDP port {port}. Another copy may already be hosting on it.");
+                ConnectProblem?.Invoke("Couldn't start hosting",
+                    $"UDP port {port} is already in use. Another copy of the game (or another program) may already be hosting on it. Close it, or change the port in BepInEx\\config\\com.jake.cookingsimmp.cfg.", false);
                 return;
             }
             _isHost = true;
@@ -133,11 +153,25 @@ namespace CookingSimMP
             if (!_net.Start())
             {
                 _log.LogError("Could not open a local UDP port to connect from.");
+                ConnectProblem?.Invoke("Couldn't connect", "This PC couldn't open a network port to connect from. A firewall or security program may be blocking the game.", true);
                 return;
             }
             _isHost = false;
+            _verified = false;
+            _problemShown = false;
+            _joinTarget = $"{address}:{port}";
             _log.LogInfo($"Connecting to {address}:{port}...");
-            _net.Connect(address, port, ConnectionKey);
+            try
+            {
+                if (_net.Connect(address, port, ConnectionKey) == null)
+                    throw new Exception("no connection was created");
+            }
+            catch (Exception e)
+            {
+                _log.LogWarning($"Couldn't connect to {address}:{port}: {e.Message}");
+                ConnectProblem?.Invoke("Couldn't connect", $"\"{address}\" isn't an address this PC can connect to ({e.Message}). Check the host's IP address and try again.", true);
+                _stopAfterPoll = true;
+            }
         }
 
         public void Stop()
@@ -224,8 +258,64 @@ namespace CookingSimMP
             {
                 if (info.Reason == DisconnectReason.ConnectionFailed)
                     _log.LogWarning("Couldn't reach the host. Is the other copy hosting (F10)? Press F11 to try again.");
+                ExplainClientDisconnect(info);
                 _stopAfterPoll = true;
             }
+        }
+
+        // Shows a connection problem on screen. A client that is about to stop because of it (wrong version, missing
+        // DLC) keeps this message instead of the plainer disconnect reason that follows.
+        public void ReportProblem(string title, string text, bool canRetry)
+        {
+            if (!_isHost)
+                _problemShown = true;
+            ConnectProblem?.Invoke(title, text, canRetry);
+        }
+
+        // Client: puts the reason the connection ended on screen. Pressing F12 here (DisconnectPeerCalled) needs none.
+        private void ExplainClientDisconnect(DisconnectInfo info)
+        {
+            string target = _joinTarget ?? "the host";
+            bool wasIn = _verified;
+            _verified = false;
+            if (ConnectProblem == null || info.Reason == DisconnectReason.DisconnectPeerCalled || _problemShown)
+                return;
+            if (wasIn)
+            {
+                string why = info.Reason == DisconnectReason.Timeout
+                    ? "The host stopped answering (its game may have closed, or the network dropped)."
+                    : info.Reason == DisconnectReason.RemoteConnectionClose
+                        ? "The host stopped hosting or closed the game."
+                        : $"The connection ended ({info.Reason}).";
+                ConnectProblem("Lost connection to the host", why + " You can join again with F11 once the host is back.", true);
+                return;
+            }
+            string text;
+            switch (info.Reason)
+            {
+                case DisconnectReason.ConnectionFailed:
+                case DisconnectReason.Timeout:
+                    text = $"Nobody answered at {target}. Check that the host is in a kitchen and has clicked Host (F10), that the IP address is right, and that both PCs are on the same network or VPN (Tailscale). Over the internet, the host needs UDP port forwarding.";
+                    break;
+                case DisconnectReason.HostUnreachable:
+                case DisconnectReason.NetworkUnreachable:
+                    text = $"{target} can't be reached from this PC. Check the IP address and that this PC is online (and on the VPN, if you use one).";
+                    break;
+                case DisconnectReason.UnknownHost:
+                    text = $"\"{target}\" isn't a known address. Type the host's IP address, for example 100.101.102.103.";
+                    break;
+                case DisconnectReason.ConnectionRejected:
+                case DisconnectReason.InvalidProtocol:
+                    text = $"The host at {target} refused the connection. It may be running a different multiplayer mod or a very old CSMP version.";
+                    break;
+                case DisconnectReason.RemoteConnectionClose:
+                    text = "The host closed the connection while you were joining. If a message about versions or DLC showed up, fix that first.";
+                    break;
+                default:
+                    text = $"The connection to {target} ended before you could join ({info.Reason}).";
+                    break;
+            }
+            ConnectProblem("Couldn't connect", text, true);
         }
 
         private void OnNetworkReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod deliveryMethod)
@@ -260,6 +350,7 @@ namespace CookingSimMP
             string theirs = reader.AvailableBytes > 0 ? reader.GetString(32) : "0.8.5 or older";
             if (theirs == Plugin.PluginVersion)
             {
+                _verified = true;
                 PeerVerified?.Invoke(peer.Id);
                 return;
             }
@@ -271,7 +362,10 @@ namespace CookingSimMP
             if (_isHost)
                 peer.Disconnect();
             else
+            {
+                ReportProblem("Different CSMP versions", text + " Install the same CSMP version on both PCs.", false);
                 _stopAfterPoll = true;
+            }
         }
 
         private void OnNetworkError(IPEndPoint endPoint, SocketError socketError)

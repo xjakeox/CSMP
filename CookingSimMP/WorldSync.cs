@@ -5,6 +5,7 @@ using System.Reflection;
 using BC.GamingPlatforms;
 using BepInEx;
 using BepInEx.Logging;
+using CS.GUI;
 using HarmonyLib;
 using Ionic.Zip;
 using LiteNetLib;
@@ -23,6 +24,9 @@ namespace CookingSimMP
     // changes in between. Whenever the host loads another kitchen, every client follows.
     //
     // While a client plays the host's world, it never saves (its own quicksave would be replaced by the host's world).
+    //
+    // RESYNC (v0.10): a button in the top right corner of the host's pause menu sends the world again to every
+    // client, which reloads it in place, the same way it follows the host into another kitchen.
     internal sealed class WorldSync
     {
         private const int ChunkSize = 32 * 1024;
@@ -73,7 +77,10 @@ namespace CookingSimMP
         private SaveLoadManager _subscribedSaves;
         private float _skipNoticeCooldown;
 
+        private bool _resyncing;          // Host: the world being sent is a RESYNC, not a join.
+
         private GUIStyle _style;
+        private GUIStyle _resyncStyle;
 
         public WorldSync(NetSession session, ManualLogSource log)
         {
@@ -187,7 +194,10 @@ namespace CookingSimMP
                 }
             }
             if (_joining.Count == 0)
+            {
+                _resyncing = false;
                 ResumeHost();
+            }
         }
 
         private void SendWorld(List<int> peers)
@@ -287,7 +297,39 @@ namespace CookingSimMP
                 game.UnpauseTime();
         }
 
-        private string NameOf(int peerId) => _names.TryGetValue(peerId, out string name) ? name : "A player";
+        // Host: RESYNC button. Every connected player reloads the host's world. The pause menu closes first so the
+        // host's clock can be held (as for a join) until everyone is back in.
+        private void Resync()
+        {
+            if (!_session.IsHost || !_session.IsConnected || _names.Count == 0 || !HostInKitchen)
+            {
+                PauseSync.Instance?.Notify("Nobody is connected to resync");
+                return;
+            }
+            try
+            {
+                GUIKitchen.Me?.pauseMenu?.BackToGame();
+            }
+            catch (Exception e)
+            {
+                _log.LogWarning($"[World] Closing the pause menu for RESYNC failed: {e.Message}");
+            }
+            _resyncing = true;
+            foreach (int peerId in _names.Keys)
+                _waiting.Add(peerId);
+            NetDataWriter writer = _session.BeginMessage(MessageType.WorldLeaving);
+            writer.Put(true);   // A resync, not another kitchen.
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _log.LogInfo($"[World] RESYNC: sending the world again to {string.Join(", ", _names.Values)}.");
+        }
+
+        private static bool HostPauseMenuOpen()
+        {
+            GUIPauseMenu menu = GUIKitchen.Me != null ? GUIKitchen.Me.pauseMenu : null;
+            return menu != null && menu.gameObject.activeInHierarchy;
+        }
+
+        internal string NameOf(int peerId) => _names.TryGetValue(peerId, out string name) ? name : "A player";
 
         private void OnPeerLeft(int peerId)
         {
@@ -343,7 +385,7 @@ namespace CookingSimMP
             if (!CanLoad(kitchenId, contentIds, out string reason))
             {
                 _log.LogWarning($"[World] Can't load the host's world: {reason}");
-                PauseSync.Instance?.Notify($"Can't join: {reason}", 10f);
+                _session.ReportProblem("Can't join this kitchen", reason, false);
                 _session.BeginMessage(MessageType.WorldRefused).Put(reason);
                 _session.SendToAll(DeliveryMethod.ReliableOrdered);
                 _session.StopAfterPoll();
@@ -517,18 +559,39 @@ namespace CookingSimMP
                         OnWorldChunk(reader);
                     break;
                 case MessageType.WorldLeaving:
-                    if (!_session.IsHost)
-                        PauseSync.Instance?.Notify("The host is loading another kitchen; you'll follow", 6f);
+                    if (_session.IsHost)
+                        break;
+                    bool resync = reader.AvailableBytes > 0 && reader.GetBool();
+                    PauseSync.Instance?.Notify(resync ? "The host is resyncing; reloading the host's world" : "The host is loading another kitchen; you'll follow", 6f);
                     break;
             }
         }
 
         // ---------- Overlay ----------
 
+        // Host, pause menu open, someone connected: RESYNC in the top right corner.
+        private void DrawResyncButton()
+        {
+            if (!_session.IsHost || !_session.IsConnected || _names.Count == 0 || _joining.Count > 0 || !HostPauseMenuOpen())
+                return;
+            if (_resyncStyle == null)
+            {
+                _resyncStyle = new GUIStyle(GUI.skin.button) { fontSize = 22, fontStyle = FontStyle.Bold };
+                _resyncStyle.normal.textColor = Color.white;
+                _resyncStyle.hover.textColor = new Color(1f, 0.85f, 0.4f);
+            }
+            var rect = new Rect(Screen.width - 200f, 20f, 180f, 50f);
+            if (GUI.Button(rect, "RESYNC", _resyncStyle))
+                Resync();
+        }
+
         public void OnGUI()
         {
+            DrawResyncButton();
             string text = null;
-            if (_session.IsHost && _joining.Count > 0)
+            if (_session.IsHost && _joining.Count > 0 && _resyncing)
+                text = $"Resyncing {string.Join(", ", _joining.Values)}\n\nYour game is paused until they've reloaded your world.";
+            else if (_session.IsHost && _joining.Count > 0)
                 text = $"{string.Join(", ", _joining.Values)} is joining\n\nYour game is paused until they've loaded in.";
             else if (!_session.IsHost && _incoming != null)
                 text = $"Downloading the host's world... {100L * _received / Math.Max(1, _incoming.Length)}%";

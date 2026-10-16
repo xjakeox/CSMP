@@ -28,16 +28,26 @@ namespace CookingSimMP
     // "add this much" means an update can never be applied twice. The host also sends anything whose contents
     // drift while cooking (temperature, flavour soaking into food) twice a second.
     //
-    // Both players pouring into the same pot at the same moment: the last update wins (TODO #4).
+    // Both players pouring into the same pot at once (v0.10): a client doesn't send its pours as whole contents.
+    // It sends each pour as "add this much of this" (ContentsAdd), the host adds it to its own pot, and the host's
+    // merged contents come back to everyone. The client keeps showing its own view until the host's contents
+    // include its last pour, so neither player's pour is lost.
+    //
+    // Bottles and shakers (InfiniteProduct): how full they are and whether the cap is on. Both copies look for
+    // changes five times a second; whoever's copy changed one sends it.
     internal sealed class ContentsSync
     {
         private const float DirtySendInterval = 0.1f;   // Local pours and seasoning go out at most 10 times a second.
         private const float DriftInterval = 0.5f;       // Host checks for cooking drift twice a second.
         private const float KeepLocalFor = 1f;          // Client ignores the host's older view of an item it just changed.
         private const float ChangeEpsilon = 0.01f;
+        private const float BottleEpsilon = 0.00001f;   // Bottle amounts are small numbers (a few ml is a few thousandths).
+        private const float BottleScanInterval = 0.2f;  // Both copies check bottles and shakers five times a second.
+        private const float PendingAddTimeout = 3f;     // Client: stop waiting for the host to confirm a pour after this.
 
         private const byte KindContainer = 1;
         private const byte KindPart = 2;
+        private const byte KindBottle = 3;
 
         private static ContentsSync _instance;
 
@@ -60,6 +70,23 @@ namespace CookingSimMP
         private float _clock;
         private float _dirtyTimer;
         private float _driftTimer;
+        private float _bottleTimer;
+
+        // Pours from a client, merged by the host (see the top). The client numbers its pours; the host remembers
+        // the last one it added to each pot and sends it with that pot's contents.
+        private readonly int _token = UnityEngine.Random.Range(1, int.MaxValue);
+        private int _nextAddSeq = 1;
+        private readonly Dictionary<int, KeyValuePair<int, float>> _pendingAdd = new Dictionary<int, KeyValuePair<int, float>>();  // Client: pot -> (last pour sent, when).
+        private readonly Dictionary<int, KeyValuePair<int, int>> _lastAdd = new Dictionary<int, KeyValuePair<int, int>>();       // Host: pot -> (client token, pour number).
+        private readonly List<PendingAdd> _adds = new List<PendingAdd>();
+
+        private struct PendingAdd
+        {
+            public int NetId;
+            public int Seq;
+            public float Quantity;
+            public byte[] Stats;
+        }
 
         // What gets sent for each kind of item. Field names are short because they end up in every message.
         private sealed class ContainerContents
@@ -74,6 +101,12 @@ namespace CookingSimMP
             public Dictionary<int, float> F;
         }
 
+        private sealed class BottleState
+        {
+            public float Q;
+            public bool O;
+        }
+
         public ContentsSync(NetSession session, ItemSync items, ManualLogSource log)
         {
             _instance = this;
@@ -86,8 +119,9 @@ namespace CookingSimMP
             _session.WorldReset += Reset;
 
             // Everything that changes a container's contents: pouring and pouring in loose spices, spilling or pouring
-            // out, emptying, tasting, and the helpers that throw contents away.
-            PatchDirty(typeof(Container), "AddVirtualProductToContainer", new[] { typeof(ProductPartStats), typeof(float) });
+            // out, emptying, tasting, and the helpers that throw contents away. Pours on a client go to the host as adds.
+            Patch(typeof(Container), "AddVirtualProductToContainer", new[] { typeof(ProductPartStats), typeof(float) },
+                prefix: nameof(AddPrefix), postfix: nameof(AddPostfix));
             PatchDirty(typeof(Container), "OnFluidLeak", new[] { typeof(float), typeof(WaterSurfaceLeakController) });
             PatchDirty(typeof(Container), "ClearContaierFromFluid", Type.EmptyTypes);
             PatchDirty(typeof(Container), "TasteContent", Type.EmptyTypes);
@@ -97,11 +131,17 @@ namespace CookingSimMP
             PatchDirty(typeof(ProductPart), "AddQuantityToProduct", new[] { typeof(ProductPartStats), typeof(ProductPartStats), typeof(float) });
             // A pan the other player is tilting spills on their copy; here it only follows, so it mustn't spill too.
             Patch(typeof(WaterSurface), "LateUpdate", Type.EmptyTypes, prefix: nameof(WaterSurfacePrefix));
+            // Same for a bottle the other player is pouring: it tilts here too, and once its cap synced open (v0.10)
+            // it poured here as well, so the pot got both pours. Here it only shows the stream (v0.10.2).
+            Patch(typeof(InfiniteProduct), "StartAdd", Type.EmptyTypes, prefix: nameof(StartPourPrefix));
+            Patch(typeof(InfiniteProduct), "StartAddAmount", new[] { typeof(float), typeof(float), typeof(Action) }, prefix: nameof(StartPourPrefix));
+            if (VisualOnlyField == null)
+                _log.LogWarning("[Contents] Couldn't find VirtualProductTransporter.isVisualsOnly; a bottle the other player pours may pour twice.");
             if (MaxLeakField == null || MaxLeakInsideField == null)
                 _log.LogWarning("[Contents] Couldn't find WaterSurface's leak fields; a pan the other player tilts may spill twice.");
         }
 
-        public static bool Handles(MessageType type) => type == MessageType.ContentsState;
+        public static bool Handles(MessageType type) => type == MessageType.ContentsState || type == MessageType.ContentsAdd;
 
         private bool Active => _session.IsConnected && _items.HasTable;
 
@@ -112,6 +152,9 @@ namespace CookingSimMP
             _changedLocallyAt.Clear();
             _warnedUnknown.Clear();
             _warnedBroken.Clear();
+            _pendingAdd.Clear();
+            _lastAdd.Clear();
+            _adds.Clear();
         }
 
         private void MarkDirty(IMovable movable)
@@ -133,6 +176,8 @@ namespace CookingSimMP
             }
 
             _dirtyTimer += deltaTime;
+            if (_dirtyTimer >= DirtySendInterval && _adds.Count > 0)
+                SendAdds();
             if (_dirtyTimer >= DirtySendInterval && _dirty.Count > 0)
             {
                 _dirtyTimer = 0f;
@@ -144,6 +189,13 @@ namespace CookingSimMP
                 }
                 _dirty.Clear();
                 Send(toSend);
+            }
+
+            _bottleTimer += deltaTime;
+            if (_bottleTimer >= BottleScanInterval)
+            {
+                _bottleTimer = 0f;
+                ScanBottles();
             }
 
             if (!_session.IsHost)
@@ -187,6 +239,8 @@ namespace CookingSimMP
         {
             if (m is Container c)
                 return Signature(c.virtualProductPartStats) + c.FluidsTemperature * 0.7f;
+            if (m is InfiniteProduct bottle)
+                return bottle.stats != null ? bottle.stats.quantity + (bottle.IsOpened ? 0.5f : 0f) : 0f;
             if (m is ProductPart p)
             {
                 float sum = Signature(p.virtualProductPartStats);
@@ -244,6 +298,11 @@ namespace CookingSimMP
                         kind = KindPart;
                         state = new PartSeasoning { V = p.virtualProductPartStats, F = p.stats?.takenFlavours };
                     }
+                    else if (pair.Value is InfiniteProduct bottle && bottle.stats != null)
+                    {
+                        kind = KindBottle;
+                        state = new BottleState { Q = bottle.stats.quantity, O = bottle.IsOpened };
+                    }
                     else
                     {
                         continue;
@@ -267,8 +326,124 @@ namespace CookingSimMP
                 writer.Put(e.Key);
                 writer.Put(e.Value.Key);
                 writer.PutBytesWithLength(e.Value.Value);
+                // Host: the last client pour this pot's contents include, so that client knows it can take them.
+                if (_session.IsHost && _lastAdd.TryGetValue(e.Key, out KeyValuePair<int, int> add))
+                {
+                    writer.Put(add.Key);
+                    writer.Put(add.Value);
+                }
+                else
+                {
+                    writer.Put(0);
+                    writer.Put(0);
+                }
             }
             _session.SendToAll(DeliveryMethod.ReliableOrdered);
+        }
+
+        // ---------- Bottles and shakers ----------
+
+        // Pouring and shaking only use up a bottle on the pourer's copy, and the cap only turns there.
+        private void ScanBottles()
+        {
+            var changed = new List<KeyValuePair<int, IMovable>>();
+            foreach (KeyValuePair<int, IMovable> pair in _items.AllItems)
+            {
+                if (!(pair.Value is InfiniteProduct bottle) || bottle == null || bottle.stats == null)
+                    continue;
+                float signature = Signature(bottle);
+                bool known = _lastSignature.TryGetValue(pair.Key, out float last);
+                if (known && Mathf.Abs(signature - last) < BottleEpsilon)
+                    continue;
+                _lastSignature[pair.Key] = signature;
+                // The first look only records it, and a bottle in the other player's hand is theirs to send.
+                if (!known || _items.IsRemoteHeld(bottle))
+                    continue;
+                changed.Add(pair);
+            }
+            Send(changed);
+        }
+
+        private static void ApplyBottle(InfiniteProduct bottle, BottleState state)
+        {
+            if (state == null || bottle.stats == null)
+                return;
+            bottle.stats.quantity = state.Q;
+            if (bottle.IsOpened == state.O || bottle.capGameObject == null)
+                return;
+            if (state.O)
+                bottle.ForceOpen();
+            else
+                bottle.ForceClose();
+        }
+
+        // ---------- Pours from a client (host merges) ----------
+
+        // Client: queue this pour for the host instead of sending the pot's whole contents.
+        private bool QueueAdd(Container c, ProductPartStats pps, float quantity)
+        {
+            if (_applying || !Active || _session.IsHost || pps == null || !_items.TryGetNetId(c, out int netId))
+                return false;
+            int seq = _nextAddSeq++;
+            _adds.Add(new PendingAdd { NetId = netId, Seq = seq, Quantity = quantity, Stats = Pack(pps) });
+            _pendingAdd[netId] = new KeyValuePair<int, float>(seq, _clock);
+            return true;
+        }
+
+        private void SendAdds()
+        {
+            NetDataWriter writer = _session.BeginMessage(MessageType.ContentsAdd);
+            writer.Put(_token);
+            writer.Put(_adds.Count);
+            foreach (PendingAdd add in _adds)
+            {
+                writer.Put(add.NetId);
+                writer.Put(add.Seq);
+                writer.Put(add.Quantity);
+                writer.PutBytesWithLength(add.Stats);
+            }
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _adds.Clear();
+        }
+
+        // Host: add the client's pours to this copy's pots, then send everyone the merged contents.
+        private void OnAdds(NetPacketReader reader)
+        {
+            int token = reader.GetInt();
+            int count = reader.GetInt();
+            for (int i = 0; i < count; i++)
+            {
+                int netId = reader.GetInt();
+                int seq = reader.GetInt();
+                float quantity = reader.GetFloat();
+                byte[] data = reader.GetBytesWithLength();
+                if (!_items.TryGetItem(netId, out IMovable movable) || !(movable is Container c))
+                {
+                    if (_warnedUnknown.Add(netId))
+                        _log.LogWarning($"[Contents] Got a pour into item {netId}, but this copy doesn't have that pot.");
+                    continue;
+                }
+                _applying = true;
+                try
+                {
+                    ProductPartStats pps = Unpack<ProductPartStats>(data);
+                    pps?.thermalGoodness?.InitAllAreas();
+                    if (pps != null)
+                        c.AddVirtualProductToContainer(pps, quantity);
+                    c.OnFluidQuantityChange?.Invoke();
+                }
+                catch (Exception e)
+                {
+                    if (_warnedBroken.Add(netId))
+                        _log.LogWarning($"[Contents] Adding the client's pour to item {netId} failed: {e.Message}");
+                }
+                finally
+                {
+                    _applying = false;
+                }
+                _lastAdd[netId] = new KeyValuePair<int, int>(token, seq);
+                MarkDirty(c);
+            }
         }
 
         private static byte[] Pack(object state)
@@ -293,6 +468,12 @@ namespace CookingSimMP
 
         private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
         {
+            if (type == MessageType.ContentsAdd)
+            {
+                if (_session.IsHost && Active)
+                    OnAdds(reader);
+                return;
+            }
             if (type != MessageType.ContentsState)
                 return;
             int count = reader.GetInt();
@@ -301,8 +482,27 @@ namespace CookingSimMP
                 int netId = reader.GetInt();
                 byte kind = reader.GetByte();
                 byte[] data = reader.GetBytesWithLength();
+                int ackToken = reader.GetInt();
+                int ackSeq = reader.GetInt();
+                if (!_session.IsHost && WaitingForOwnPour(netId, ackToken, ackSeq))
+                    continue;
                 Apply(netId, kind, data);
             }
+        }
+
+        // Client: true while the host's contents for this pot don't include this copy's last pour yet.
+        private bool WaitingForOwnPour(int netId, int ackToken, int ackSeq)
+        {
+            if (!_pendingAdd.TryGetValue(netId, out KeyValuePair<int, float> pending))
+                return false;
+            if ((ackToken == _token && ackSeq >= pending.Key) || _clock - pending.Value > PendingAddTimeout)
+            {
+                _pendingAdd.Remove(netId);
+                // The host's contents include everything poured here; take them even if something else changed here.
+                _changedLocallyAt.Remove(netId);
+                return false;
+            }
+            return true;
         }
 
         private void Apply(int netId, byte kind, byte[] data)
@@ -324,6 +524,8 @@ namespace CookingSimMP
                     ApplyContainer(c, Unpack<ContainerContents>(data));
                 else if (kind == KindPart && movable is ProductPart p)
                     ApplyPart(p, Unpack<PartSeasoning>(data));
+                else if (kind == KindBottle && movable is InfiniteProduct bottle)
+                    ApplyBottle(bottle, Unpack<BottleState>(data));
                 _lastSignature[netId] = Signature(movable);
             }
             catch (Exception e)
@@ -433,11 +635,70 @@ namespace CookingSimMP
             }
         }
 
+        // Client: a pour becomes an add for the host (QueueAdd), so it isn't also sent as whole contents.
+        private static void AddPrefix(Container __instance, ProductPartStats newPPS, float pQuantity, out bool __state)
+        {
+            __state = false;
+            try
+            {
+                __state = _instance != null && _instance.QueueAdd(__instance, newPPS, pQuantity);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Contents] patch error: " + e);
+            }
+        }
+
+        private static void AddPostfix(Container __instance, bool __state)
+        {
+            try
+            {
+                if (!__state)
+                    _instance?.MarkDirty(__instance);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Contents] patch error: " + e);
+            }
+        }
+
         private static void HelperPostfix(Container container)
         {
             try
             {
                 _instance?.MarkDirty(container);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Contents] patch error: " + e);
+            }
+        }
+
+        private static readonly FieldInfo VisualOnlyField = AccessTools.Field(typeof(VirtualProductTransporter), "isVisualsOnly");
+
+        // Transporters this sync switched to show-only, so they can be switched back when this player pours.
+        private static readonly HashSet<VirtualProductTransporter> ShowOnly = new HashSet<VirtualProductTransporter>();
+
+        // Runs before the bottle starts its stream: in show-only mode the stream carries nothing into the pot and
+        // doesn't empty the bottle. The pourer's copy does both, and sends the result.
+        private static void StartPourPrefix(InfiniteProduct __instance)
+        {
+            try
+            {
+                VirtualProductTransporter transporter = __instance.virtualProductTransporter;
+                if (transporter == null || VisualOnlyField == null)
+                    return;
+                bool followOnly = _instance != null && _instance.Active && _instance._items.IsRemoteHeld(__instance);
+                if (followOnly)
+                {
+                    if (ShowOnly.Add(transporter))
+                        transporter.SwitchModeToVisualOnly();
+                }
+                else if (ShowOnly.Remove(transporter))
+                {
+                    VisualOnlyField.SetValue(transporter, false);
+                }
+                ShowOnly.RemoveWhere(t => t == null);
             }
             catch (Exception e)
             {
