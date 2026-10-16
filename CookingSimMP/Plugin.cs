@@ -9,7 +9,7 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "com.jake.cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.7.2";
+        public const string PluginVersion = "0.8.5";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
@@ -20,7 +20,12 @@ namespace CookingSimMP
         private CookingSync _cookingSync;
         private PauseSync _pauseSync;
         private MoneySync _moneySync;
+        private CutSync _cutSync;
+        private ContentsSync _contentsSync;
+        private CleaningSync _cleaningSync;
+        private MopSync _mopSync;
         private ConnectWindows _connectWindows;
+        private int _marker;
 
         private void Awake()
         {
@@ -33,15 +38,20 @@ namespace CookingSimMP
                 "UDP port the host listens on and the joiner connects to.");
 
             _session = new NetSession(Logger);
+            _session.MessageReceived += OnMarker;
             _playerSync = new PlayerSync(_session, Logger);
             _itemSync = new ItemSync(_session, Logger);
             _interactableSync = new InteractableSync(_session, Logger);
             _cookingSync = new CookingSync(_session, _itemSync, Logger);
             _pauseSync = new PauseSync(_session, _cookingSync, _interactableSync, Logger);
             _moneySync = new MoneySync(_session, Logger);
+            _cutSync = new CutSync(_session, _itemSync, Logger);
+            _contentsSync = new ContentsSync(_session, _itemSync, Logger);
+            _cleaningSync = new CleaningSync(_session, _itemSync, Logger);
+            _mopSync = new MopSync(_session, _itemSync, Logger);
             _connectWindows = new ConnectWindows(_session, _hostAddress, _port);
             Logger.LogInfo($"{PluginName} {PluginVersion} loaded (process {NetSession.ProcessId}). " +
-                           $"F10 = host on port {_port.Value}, F11 = join (asks for the address), F12 = disconnect, F9 (client) = cooking sync test.");
+                           $"F10 = host on port {_port.Value}, F11 = join (asks for the address), F12 = disconnect, F9 (client) = cooking sync test, F8 = log marker.");
         }
 
         private void Update()
@@ -50,6 +60,17 @@ namespace CookingSimMP
             _connectWindows.Tick();
             if (Input.GetKeyDown(KeyCode.F12))
                 _session.Stop();
+            // F8 writes a numbered marker into both players' logs, so test steps are easy to find.
+            if (Input.GetKeyDown(KeyCode.F8))
+            {
+                _marker++;
+                Logger.LogInfo($"========== F8 MARKER {_marker} ==========");
+                if (_session.IsConnected)
+                {
+                    _session.BeginMessage(MessageType.LogMarker).Put(_marker);
+                    _session.SendToAll(LiteNetLib.DeliveryMethod.ReliableOrdered);
+                }
+            }
 
             _session.Poll();
             // Unscaled so syncing keeps running while the game is paused.
@@ -59,6 +80,17 @@ namespace CookingSimMP
             _cookingSync.Tick(Time.unscaledDeltaTime);
             _pauseSync.Tick(Time.unscaledDeltaTime);
             _moneySync.Tick(Time.unscaledDeltaTime);
+            _contentsSync.Tick(Time.unscaledDeltaTime);
+            _cleaningSync.Tick(Time.unscaledDeltaTime);
+            _mopSync.Tick(Time.unscaledDeltaTime);
+        }
+
+        private void OnMarker(int peerId, MessageType type, LiteNetLib.NetPacketReader reader)
+        {
+            if (type != MessageType.LogMarker)
+                return;
+            _marker = reader.GetInt();
+            Logger.LogInfo($"========== F8 MARKER {_marker} (pressed by the other player) ==========");
         }
 
         private void LateUpdate() => _itemSync.LateTick(Time.unscaledDeltaTime);

@@ -40,6 +40,7 @@ namespace CookingSimMP
             Rotable = 4,     // CS.SwitchSpace.SwitchCustomRotable (state = rotation index)
             PushButton = 5,  // Mixer on/off, cutter and sauce machines (a press, no state)
             FrierButton = 6, // Fryer oil fill / drain (a press, no state)
+            CutterMode = 7,  // Automatic cutter's cut mode, changed with E (state = mode index, its lit diode)
         }
 
         internal static InteractableSync Instance;
@@ -67,6 +68,10 @@ namespace CookingSimMP
         private static readonly FieldInfo DrawerTweener = AccessTools.Field(typeof(Drawer), "_currentTweener");
         private static readonly FieldInfo PushButtonUnderChange = AccessTools.Field(typeof(PushButton), "underChange");
         private static readonly MethodInfo PushButtonIsLocked = AccessTools.PropertyGetter(typeof(PushButton), "IsLocked");
+        private static readonly FieldInfo CutterModeField = AccessTools.Field(typeof(Stands.AutomaticCutter), "currentCutMode");
+        private static readonly FieldInfo CutterDiodes = AccessTools.Field(typeof(Stands.AutomaticCutter), "modeDiodes");
+        private static readonly FieldInfo CutterDiodeOn = AccessTools.Field(typeof(Stands.AutomaticCutter), "diodeOnMaterial");
+        private static readonly FieldInfo CutterDiodeOff = AccessTools.Field(typeof(Stands.AutomaticCutter), "diodeOffMaterial");
 
         private sealed class PendingChange
         {
@@ -151,11 +156,13 @@ namespace CookingSimMP
                 case SwitchCustomRotable _: return Kind.Rotable;
                 case PushButton _: return Kind.PushButton;
                 case FrierButton _: return Kind.FrierButton;
+                case Stands.AutomaticCutter _: return Kind.CutterMode;
                 default: return Kind.None;
             }
         }
 
-        private static bool HasState(Kind kind) => kind == Kind.Switch || kind == Kind.Door || kind == Kind.Drawer || kind == Kind.Rotable;
+        private static bool HasState(Kind kind) =>
+            kind == Kind.Switch || kind == Kind.Door || kind == Kind.Drawer || kind == Kind.Rotable || kind == Kind.CutterMode;
 
         private static string PathOf(Transform t)
         {
@@ -175,6 +182,7 @@ namespace CookingSimMP
             all.AddRange(Object.FindObjectsOfType<SwitchCustomRotable>());
             all.AddRange(Object.FindObjectsOfType<PushButton>());
             all.AddRange(Object.FindObjectsOfType<FrierButton>());
+            all.AddRange(Object.FindObjectsOfType<Stands.AutomaticCutter>());
             return all;
         }
 
@@ -295,6 +303,7 @@ namespace CookingSimMP
                 case Kind.Drawer: return ((Drawer)c).IsDrawerOpen ? 1 : 0;
                 case Kind.Switch: return ((Switch)c).Mode;
                 case Kind.Rotable: return ((SwitchCustomRotable)c).CurrentRotationIndex;
+                case Kind.CutterMode: return (int)CutterModeField.GetValue(c);
                 default: return 0;
             }
         }
@@ -307,6 +316,7 @@ namespace CookingSimMP
                 case Kind.Drawer: return value != 0 ? "open" : "closed";
                 case Kind.Switch: return "mode " + value;
                 case Kind.Rotable: return "setting " + value;
+                case Kind.CutterMode: return "cut mode " + value;
                 default: return "press";
             }
         }
@@ -346,6 +356,30 @@ namespace CookingSimMP
             if (Applying || rotable.CurrentRotationIndex == previous)
                 return;
             SendChange(rotable, Kind.Rotable, rotable.CurrentRotationIndex, previous, false);
+        }
+
+        internal void OnLocalCutterMode(Stands.AutomaticCutter cutter, int previous)
+        {
+            int mode = ReadState(cutter, Kind.CutterMode);
+            if (Applying || mode == previous)
+                return;
+            SendChange(cutter, Kind.CutterMode, mode, previous, false);
+        }
+
+        // Same as AutomaticCutter.ChangeCutMode, but to a given mode: light that mode's diode only.
+        private static void SetCutterMode(Stands.AutomaticCutter cutter, int mode)
+        {
+            var diodes = (List<MeshRenderer>)CutterDiodes.GetValue(cutter);
+            if (diodes == null || mode < 0 || mode >= diodes.Count)
+                return;
+            var on = (Material)CutterDiodeOn.GetValue(cutter);
+            var off = (Material)CutterDiodeOff.GetValue(cutter);
+            int current = (int)CutterModeField.GetValue(cutter);
+            if (current >= 0 && current < diodes.Count && diodes[current] != null)
+                diodes[current].material = off;
+            CutterModeField.SetValue(cutter, mode);
+            if (diodes[mode] != null)
+                diodes[mode].material = on;
         }
 
         internal void OnLocalPress(Component button, Kind kind)
@@ -509,6 +543,9 @@ namespace CookingSimMP
                     case Kind.FrierButton:
                         ((FrierButton)c).OnLeftClick();
                         break;
+                    case Kind.CutterMode:
+                        SetCutterMode((Stands.AutomaticCutter)c, value);
+                        break;
                 }
             }
             catch (Exception e)
@@ -624,6 +661,7 @@ namespace CookingSimMP
             Patch(typeof(SwitchCustomRotable), "TurnOn", Type.EmptyTypes, prefix: nameof(InteractPatches.RotablePrefix), postfix: nameof(InteractPatches.RotablePostfix));
             Patch(typeof(PushButton), "OnLeftClick", Type.EmptyTypes, prefix: nameof(InteractPatches.PushButtonPrefix), postfix: nameof(InteractPatches.PushButtonPostfix));
             Patch(typeof(FrierButton), "OnLeftClick", Type.EmptyTypes, postfix: nameof(InteractPatches.FrierButtonPostfix));
+            Patch(typeof(Stands.AutomaticCutter), "ChangeCutMode", Type.EmptyTypes, prefix: nameof(InteractPatches.CutterModePrefix), postfix: nameof(InteractPatches.CutterModePostfix));
             // Opening a door or drawer shoves the local player out of the way if they stand too close.
             // That shouldn't happen because the *other* player opened it.
             Patch(typeof(Switch), "MovePlayerWhenIsTooClose", new[] { typeof(Transform), typeof(float) }, prefix: nameof(InteractPatches.MovePlayerPrefix));
@@ -729,6 +767,22 @@ namespace CookingSimMP
 
         public static void FrierButtonPostfix(FrierButton __instance) =>
             Guard(() => InteractableSync.Instance?.OnLocalPress(__instance, InteractableSync.Kind.FrierButton));
+
+        public static void CutterModePrefix(Stands.AutomaticCutter __instance, out int __state)
+        {
+            __state = -1;
+            try
+            {
+                __state = (int)AccessTools.Field(typeof(Stands.AutomaticCutter), "currentCutMode").GetValue(__instance);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Interact] patch error: " + e);
+            }
+        }
+
+        public static void CutterModePostfix(Stands.AutomaticCutter __instance, int __state) =>
+            Guard(() => InteractableSync.Instance?.OnLocalCutterMode(__instance, __state));
 
         public static bool MovePlayerPrefix()
         {

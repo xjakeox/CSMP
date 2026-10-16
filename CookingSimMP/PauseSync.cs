@@ -230,7 +230,7 @@ namespace CookingSimMP
             }
         }
 
-        private static string LocalName()
+        internal static string LocalName()
         {
             try
             {
@@ -246,6 +246,9 @@ namespace CookingSimMP
         }
 
         // ---------- Overlay ----------
+
+        // A short line at the top of the screen, e.g. "Jake is holding that".
+        internal void Notify(string text) => ShowBanner(text);
 
         private void ShowBanner(string text)
         {

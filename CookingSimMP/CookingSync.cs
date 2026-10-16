@@ -23,7 +23,7 @@ namespace CookingSimMP
     // cooking type (boiling, frying, baking, microwave, deep frying, grilled) and a visual value that drives
     // the browning. Those private fields are copied as-is; the game's setters would reset the threshold flags.
     //
-    // Items are identified with ItemSync's network IDs, so pieces created by cutting (no ID yet) aren't covered.
+    // Items are identified with ItemSync's network IDs. Cut pieces get theirs from CutSync.
     internal sealed class CookingSync
     {
         private const float SendInterval = 0.25f;     // Host sends changed items 4 times a second.
@@ -206,7 +206,7 @@ namespace CookingSimMP
             }
         }
 
-        // Food being heated on the host that has no network ID (e.g. a cut piece) can't be synced yet.
+        // Food being heated on the host that has no network ID can't be synced.
         private void WarnAboutUnsyncedHeating()
         {
             foreach (ProductPart part in Object.FindObjectsOfType<ProductPart>())
@@ -216,7 +216,7 @@ namespace CookingSimMP
                 if (part.PhysicsController != null && part.PhysicsController.HeatTaken(out _, out _))
                 {
                     _warnedNoId.Add(part);
-                    _log.LogWarning($"[Cook] '{part.name}' is cooking on the host but has no network ID (probably a cut piece; see TODO #1), so its doneness isn't synced.");
+                    _log.LogWarning($"[Cook] '{part.name}' is cooking on the host but has no network ID (e.g. a piece whose cut the other copy couldn't repeat), so its doneness isn't synced.");
                 }
             }
         }

@@ -27,7 +27,7 @@ To play with a friend, they type your Tailscale/VPN address (shown in your F10 w
 
 ## Test held-object sync (milestone 3)
 
-Everything you can pick up syncs while someone holds it: containers, loose food, knives and other tools, oil bottles, spice shakers. What happens *to* items (cutting, pouring, seasoning, cooking) doesn't sync yet.
+Everything you can pick up syncs while someone holds it: containers, loose food, knives and other tools, oil bottles, spice shakers. Cutting, pouring, seasoning and cooking have their own sections below.
 
 1. Back up the save folder first: both copies share it.
 2. Load the **same save** in both copies and don't move anything, then connect.
@@ -51,7 +51,7 @@ The host is in charge of how cooked food is. Both copies still cook on their own
 1. Connect, turn on a stove or the grill in either copy and put a steak on it.
 2. The steak should cook at the same rate on both copies. Problems show up as `[Cook]` warnings.
 3. To prove the client really takes the host's values, press **F9** in the client. That stops the client's own cooking. Food on the client should keep cooking at the same rate, now only from the host's updates. Press F9 again to turn it back on.
-4. Cut pieces aren't synced yet (TODO #1); the host logs a warning when one is cooking.
+4. Cut pieces cook in sync too (v0.8). If a piece has no network ID, the host logs a `[Cook]` warning when it starts cooking.
 
 ## Test pause sync (v0.6)
 
@@ -74,7 +74,42 @@ Both players share one wallet, kept by the host. Buying, dish payments, tips, re
 5. Serve a dish in either copy. The payment and tip show up on both screens.
 6. Known gap: putting a plate back on its stack makes the next plate free only on that player's screen, so the other player still pays for theirs (TODO #5).
 
-## Keys
+## Test cutting and pan contents (v0.8)
+
+Cutting food on one copy cuts it the same way on the other, and whatever goes into a pan or pot (oil, water, sauce, spices) shows up on both. Seasoning sprinkled on food is synced too; it has nothing to see, so check it in the hover info. The pouring stream itself only shows for the player pouring.
+
+1. Load the same save in both copies and connect. Wait a few seconds after the kitchen appears.
+2. In the client, put a vegetable on a cutting board and cut it a few times. The host should show the same slices in the same places. Pick up a slice in the host and move it; it should follow in the client.
+3. Do the same from the host side, and with a piece of meat.
+4. Put some food in the automatic cutter and press its button in either copy. Both copies should end up with the same pieces. Only the copy that pressed the button actually cuts. Changing the cutter's mode with E lights the same mode light on both copies (v0.8.1).
+5. Put a pan on a stove in the host. In the client, pour oil into it. The oil should appear in the host's pan a moment later. Add salt or pepper from either side.
+6. Fill a pot with water in the host, turn on the stove and let it heat. The client's pot should stay at the same temperature. Pour some of it into another pot or pan from the client; both pots should change on both screens.
+7. Salt a steak in one copy. Hovering over it in the other copy should show the same seasoning. Fry it in the oiled pan; its doneness should match on both.
+8. Problems show up as `[Cut]` or `[Contents]` warnings.
+
+Known gaps: the hand blender, how full bottles and shakers are, and the pizza, sushi and Cooking Ninja cuts are untested. If both players pour into the same pot at the same moment, one of the pours can be lost (TODO #4).
+
+## Test dirt and cleaning (v0.8)
+
+Stains (spills, splashes, broken eggs) and cleaning them with the sponge or mop show up on both copies.
+
+1. Connect as above.
+2. In the client, spill some oil or water on a counter, or tilt a full pot until it spills. The same stain should appear in the host.
+3. In the host, pick up the sponge and clean half of that stain. The client should see the same half cleaned. Then finish it from the client.
+4. Spill something on the floor and clean it with the mop from the other copy. The other copy should see the mop head slide across the floor with the stick pointing up to the player's hand (v0.8.1), and can't grab the mop while it's in use.
+5. Break an egg. It breaks on both copies by itself, so its stain gets painted twice and may look a little darker. Cleaning it once should still clear it on both.
+6. Problems show up as `[Clean]` warnings.
+
+## Test grab conflicts (v0.8)
+
+Something the other player is holding can't be taken out of their hands.
+
+1. Connect and load into the kitchen in both copies.
+2. In the host, pick up a plate and hold it. In the client, click the same plate. Nothing should happen, and "<host name> is holding that" should show at the top of the client's screen.
+3. In the client, carry a pan or tray with food in it (try a fish or a piece of meat). The food should ride along in the pan on the host's screen and stay there after it's put down (v0.8.2 fixed food with bones vanishing; move it around 5 or 6 times to be sure). In the host, try to take the food out of the pan. It should be blocked the same way.
+4. Drop the plate in the host. The client can pick it up right away.
+5. Both click the same plate at the same moment (count down out loud). The host should end up with it. If the client grabbed it too, the client's copy drops it straight away and shows "<host name> grabbed that first".
+
 
 | Key | Action |
 |---|---|
@@ -82,3 +117,4 @@ Both players share one wallet, kept by the host. Buying, dish payments, tips, re
 | F11 | Open the join window (type the host's address; Connect or Cancel) |
 | F12 | Disconnect |
 | F9 | Client only: turn its own cooking off/on to test cooking sync |
+| F8 | Write a numbered marker into both players' logs (for testing) |

@@ -29,6 +29,13 @@ namespace CookingSimMP
         MoneyReady = 16,       // Client -> host: "I'm in this kitchen, send me the shared balance."
         MoneyRequest = 17,     // Client -> host: "My cash changed by this much; apply it to the shared wallet."
         MoneyChange = 18,      // Host -> client: "The wallet changed by this much and now holds this balance."
+        CutDone = 19,          // "I cut this food item with this plane; the pieces got these IDs."
+        ContentsState = 20,    // "This pan's/pot's contents (or this food's seasoning) are now this."
+        PaintStrokes = 21,     // "I stained or cleaned these spots on these surfaces."
+        HoldDenied = 22,       // Host -> client: "I'm already holding that item; let go of it."
+        LogMarker = 23,        // "Write test marker N into your log too" (F8).
+        MopState = 24,         // "My mop head is here" (while mopping), or "I put the mop down here".
+        ContentRest = 25,      // "The pan/tray I carried came to rest; this food in it ended up exactly here."
     }
 
     // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
