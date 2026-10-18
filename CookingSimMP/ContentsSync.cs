@@ -135,6 +135,17 @@ namespace CookingSimMP
             // it poured here as well, so the pot got both pours. Here it only shows the stream (v0.10.2).
             Patch(typeof(InfiniteProduct), "StartAdd", Type.EmptyTypes, prefix: nameof(StartPourPrefix));
             Patch(typeof(InfiniteProduct), "StartAddAmount", new[] { typeof(float), typeof(float), typeof(Action) }, prefix: nameof(StartPourPrefix));
+            // v0.11.5: the sink runs on both copies (its taps are synced), so its water reached the pot twice: on the host,
+            // and on the client, which sent it on to the host. v0.11.7: on a client, sink water that hits a pot only
+            // shows the pouring tooltip (Container.ReportDelta) and changes nothing; the host's water comes back with
+            // the pot's contents. (v0.11.5 made the stream show-only, which lost the tooltip. v0.11.6 let the water
+            // into the client's pot without sending it, but any later change to that pot sent the whole pot, client
+            // water included, and the host's pot doubled.)
+            Patch(typeof(Container), "OnVirtualProductSphereHit", new[] { typeof(VirtualProductSphereTrigger) },
+                prefix: nameof(SphereHitPrefix));
+            // v0.11.8: turning the tap off and on again quickly (both players at the sink, or a synced switch landing
+            // right after a local one) started a second stream of spheres next to the first, so the sink ran double.
+            Patch(typeof(VirtualProductTransporter), "SetParticle", null, prefix: nameof(SetParticlePrefix));
             if (VisualOnlyField == null)
                 _log.LogWarning("[Contents] Couldn't find VirtualProductTransporter.isVisualsOnly; a bottle the other player pours may pour twice.");
             if (MaxLeakField == null || MaxLeakInsideField == null)
@@ -147,6 +158,7 @@ namespace CookingSimMP
 
         private void Reset()
         {
+            IsSinkStream.Clear();
             _dirty.Clear();
             _lastSignature.Clear();
             _changedLocallyAt.Clear();
@@ -719,6 +731,84 @@ namespace CookingSimMP
             catch (Exception e)
             {
                 Debug.LogError("[CookingSimMP] [Contents] patch error: " + e);
+            }
+        }
+
+        private static readonly Dictionary<VirtualProductTransporter, bool> IsSinkStream = new Dictionary<VirtualProductTransporter, bool>();
+        private static readonly MethodInfo ReportDeltaMethod = AccessTools.Method(typeof(Container), "ReportDelta", new[] { typeof(VirtualProductSphereTrigger) });
+
+        private static readonly FieldInfo IsSinkField = AccessTools.Field(typeof(VirtualProductTransporter), "isSink");
+        private static readonly FieldInfo CreateRoutineField = AccessTools.Field(typeof(VirtualProductTransporter), "createCorutine");
+
+        // v0.11.8: v0.11.7 only looked for a SinkTap above the stream, and the sink's stream isn't always under
+        // it, so the client's sink water still went into the pot (and on to the host). Now the taps themselves say
+        // which stream is theirs.
+        private static bool IsSink(VirtualProductTransporter transporter)
+        {
+            if (IsSinkStream.TryGetValue(transporter, out bool sink))
+                return sink;
+            sink = transporter.GetComponentInParent<SinkTap>() != null
+                   || (IsSinkField != null && IsSinkField.GetValue(transporter) is bool flag && flag);
+            if (!sink)
+            {
+                foreach (SinkTap tap in UnityEngine.Object.FindObjectsOfType<SinkTap>())
+                {
+                    if (tap != null && tap.fluid == transporter)
+                    {
+                        sink = true;
+                        break;
+                    }
+                }
+            }
+            IsSinkStream[transporter] = sink;
+            if (sink)
+                _instance?._log.LogInfo($"[Contents] Found the sink's water stream '{transporter.name}'." +
+                    (_instance._session.IsHost ? "" : " Here it only shows the pouring tooltip; the host's sink fills the pot."));
+            return sink;
+        }
+
+        // A sink stream that's still running when the tap turns on again keeps running; don't start a second one.
+        private static void SetParticlePrefix(VirtualProductTransporter __instance)
+        {
+            try
+            {
+                if (_instance == null || !_instance.Active || CreateRoutineField == null || !IsSink(__instance))
+                    return;
+                if (CreateRoutineField.GetValue(__instance) is Coroutine running && running != null)
+                {
+                    __instance.StopCoroutine(running);
+                    CreateRoutineField.SetValue(__instance, null);
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Contents] patch error: " + e);
+            }
+        }
+
+        // Returns false to skip the hit: a client's sink water shows the tooltip but doesn't go into the pot.
+        private static bool SphereHitPrefix(Container __instance, VirtualProductSphereTrigger sphere)
+        {
+            try
+            {
+                if (_instance == null || !_instance.Active || _instance._session.IsHost || ReportDeltaMethod == null)
+                    return true;
+                if (sphere == null || sphere.virtualProducts.Count <= 0 || sphere.Owner == null)
+                    return true;
+                VirtualProductTransporter transporter = sphere.Owner.ownerTransporter;
+                if (transporter == null)
+                    return true;
+                if (!IsSink(transporter))
+                    return true;
+                // What the game does first on a hit: count the sphere as caught, and show the tooltip.
+                transporter.spheresRemovedAtContainer += sphere.quantity;
+                ReportDeltaMethod.Invoke(__instance, new object[] { sphere });
+                return false;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Contents] patch error: " + e);
+                return true;
             }
         }
 

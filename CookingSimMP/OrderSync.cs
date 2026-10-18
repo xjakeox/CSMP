@@ -432,6 +432,7 @@ namespace CookingSimMP
                 _endedHere[recipe.globalId] = _clock;
 
             int plateId = container != null && _items.TryGetNetId(container, out int id) ? id : -1;
+            List<int> food = container != null ? _items.FoodIdsOn(container) : new List<int>();
             NetDataWriter writer = _session.BeginMessage(MessageType.OrderEnded);
             writer.Put(recipe.globalId);
             writer.Put(failed);
@@ -460,6 +461,10 @@ namespace CookingSimMP
             }
             writer.Put(record);
             writer.Put(scoreJson);
+            // v0.11.4: the food on the plate here, so the other copy removes it even if it isn't on its plate there.
+            writer.Put(food.Count);
+            foreach (int foodId in food)
+                writer.Put(foodId);
             _session.SendToAll(DeliveryMethod.ReliableOrdered);
             // The plate and its food leave the kitchen here; the other copy removes its own with this message, so
             // they mustn't be reported (or asked back) one by one.
@@ -475,11 +480,18 @@ namespace CookingSimMP
             int plateId = reader.GetInt();
             string record = reader.GetString();
             string scoreJson = reader.GetString();
+            var food = new List<int>();
+            if (reader.AvailableBytes >= 4)
+            {
+                int count = reader.GetInt();
+                for (int i = 0; i < count && reader.AvailableBytes >= 4; i++)
+                    food.Add(reader.GetInt());
+            }
             _claims.Remove(globalId);
 
-            // The served plate leaves the kitchen on the copy that served it.
-            if (plateId >= 0)
-                _items.RemoveServedPlate(plateId);
+            // The served plate leaves the kitchen on the copy that served it, with the food that was on it there.
+            if (plateId >= 0 || food.Count > 0)
+                _items.RemoveServedPlate(plateId, food);
 
             if (_session.IsHost && fameDelta != 0 && PlayerStats.Me != null)
                 PlayerStats.Me.ChangeFame(fameDelta);

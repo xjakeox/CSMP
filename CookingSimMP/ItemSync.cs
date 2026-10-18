@@ -24,7 +24,7 @@ namespace CookingSimMP
     // the network delay, the host wins and the client's copy drops it and follows the host.
     internal sealed partial class ItemSync
     {
-        private const float SendInterval = 0.05f;
+        private const float SendInterval = 1f / 30f;  // v0.11.4: 30 poses a second (was 20), for tools like the spatula.
         private const float SettleTime = 1f;          // After letting go, keep sending at least this long...
         private const float StillTime = 0.3f;         // ...and until it has stopped moving for this long.
         private const float WatchTime = 60f;          // Keep watching a resting item this long in case the game moves it again.
@@ -32,7 +32,10 @@ namespace CookingSimMP
         private const float WakeAngle = 2f;           // ...or turns this much (degrees) starts sending again.
         private const float ContentWakeDelay = 0.15f; // Food in a watched pan waits this long before it counts as moving.
         private const float MatchDistance = 0.5f;     // Max metres between host and client copies of an item.
-        private const float SmoothingSpeed = 20f;
+        private const float SmoothingSpeed = 30f;
+        // v0.11.4: over the internet, poses arrive late and unevenly, so a held item trailed the hand. Between poses it
+        // now keeps moving the way it was going, for at most this long, which hides most of the delay.
+        private const float MaxLead = 0.1f;
 
         // What the other copy has to create when someone buys an item.
         internal enum SpawnKind : byte
@@ -41,6 +44,7 @@ namespace CookingSimMP
             Tool = 2,
             Dummy = 3,
             ProductPart = 4,
+            InfiniteProduct = 5,   // v0.11.5: a carton, bottle or shaker bought from a shelf (asset = product ID).
         }
 
         private const float BlockedMessageCooldown = 2f;
@@ -102,6 +106,8 @@ namespace CookingSimMP
             public List<Rigidbody> Bones = new List<Rigidbody>();
             public List<JointCorrections> Joints = new List<JointCorrections>();  // Paused while held, so they don't tug the bones we place.
             public int ContentCount;
+            public Vector3 Velocity;             // From the last two poses, for leading between them.
+            public float LastPoseAt;             // Time.unscaledTime the last pose arrived; 0 before the first.
         }
 
         // Anything that has to move rigidly with a remote item: its root object, its physics bones
@@ -123,6 +129,7 @@ namespace CookingSimMP
             _session.MessageReceived += OnMessage;
             PatchPick();
             PatchLifecycle();
+            PatchEggs();
             _session.PeerLeft += _ => Reset();
             _session.Stopped += Reset;
             _session.WorldReset += Reset;
@@ -217,7 +224,20 @@ namespace CookingSimMP
                 return;
             Transform ht = carried.Movable.gameObject.transform;
             Transform root = m.gameObject.transform;
+            bool pinnedAlready = IsPinnedIn(carried, m);
+            // v0.11.4: put it in the carried container's frame first, so it's pinned at the right spot.
+            if (!pinnedAlready && _remoteHeld.TryGetValue(netId, out RemoteHeldItem following))
+            {
+                ReleaseRemoteHeld(following, snap: false);
+                _remoteHeld.Remove(netId);
+            }
             root.SetPositionAndRotation(ht.TransformPoint(localPosition), ht.rotation * localRotation);
+            if (!pinnedAlready)
+            {
+                // Scooped into it while carried (see CarriedContents.cs).
+                StartCarrying(netId, m, holderId, carried);
+                return;
+            }
             // Its pinned parts now sit somewhere else relative to the carried container; record the new spots.
             Quaternion inverse = Quaternion.Inverse(carried.Main.rotation);
             foreach (PinnedPart pinned in carried.Pinned)
@@ -420,6 +440,8 @@ namespace CookingSimMP
         {
             ClearTable();
             _pendingSeats.Clear();
+            _carriedContents.Clear();
+            _reportedLoose.Clear();
             _readySentForScene = null;
             _pendingReadyScene = null;
             _nextLocalId = 0;
@@ -670,7 +692,12 @@ namespace CookingSimMP
             }
             foreach (int netId in _scratchIds)
             {
-                LocalTrack track = _localTracks[netId];
+                // v0.11.4 bug: an item that landed in a carried container earlier in this loop was dropped from the
+                // tracks, and reading it here threw, which stopped every item update for that frame.
+                if (!_localTracks.TryGetValue(netId, out LocalTrack track))
+                    continue;
+                if (!track.InHand)
+                    _carriedContents.Remove(netId);
 
                 // The game removed it while we were in charge, e.g. a plate put back on its stack.
                 if (!IsAlive(track.Movable))
@@ -699,7 +726,11 @@ namespace CookingSimMP
                 if (track.Sending)
                 {
                     if (sendNow)
+                    {
                         SendPose(netId, track.Movable, MessageType.HoldPose, DeliveryMethod.Sequenced);
+                        if (track.InHand && track.Movable is Container carriedHere)
+                            SendCarriedContentChanges(netId, carriedHere);
+                    }
                     if (track.InHand)
                         continue;
 
@@ -972,6 +1003,13 @@ namespace CookingSimMP
         {
             if (product == null)
                 return;
+            // v0.11.5: cartons, bottles and shakers are the product itself (InfiniteProduct), moved straight into the
+            // hand. No pieces spawn, so ProductPartSpawned never fired and they were never sent.
+            if (product is InfiniteProduct bottle)
+            {
+                AnnounceNewItem(bottle);
+                return;
+            }
             product.ProductPartSpawned += part =>
             {
                 if (part != null)
@@ -1070,6 +1108,9 @@ namespace CookingSimMP
                 case ProductPart _:
                     kind = SpawnKind.ProductPart;
                     return true;
+                case InfiniteProduct _:
+                    kind = SpawnKind.InfiniteProduct;
+                    return true;
                 default:
                     kind = default;
                     return false;
@@ -1095,6 +1136,9 @@ namespace CookingSimMP
                     return factory.CreateDummy(assetId, position, rotation, pay: false);
                 case SpawnKind.ProductPart:
                     return CreateProductPart(assetId, position, rotation);
+                case SpawnKind.InfiniteProduct:
+                    // ProductsManager.CreateProduct with no spawn point: made where it is, not moved to a hand.
+                    return TemporalSingleton<ProductsManager>.Me.CreateProduct(assetId, position, scale, rotation, pay: false) as IMovable;
                 default:
                     return null;
             }
@@ -1220,6 +1264,8 @@ namespace CookingSimMP
             }
             _byNetId[netId] = copy;
             _netIdOf[copy] = netId;
+            if (kind == SpawnKind.ProductPart)
+                FadeIfEggShell(assetId, copy);
             // The container is in the other player's hands here: carry the new item with it.
             if (holder != null && _remoteHeld.TryGetValue(holderId, out RemoteHeldItem carried) && carried.Main != null)
             {
@@ -1256,16 +1302,24 @@ namespace CookingSimMP
         }
 
         // The other player served this plate: it left the kitchen on their copy, so it goes here too, with the food on it.
-        public void RemoveServedPlate(int netId)
+        public void RemoveServedPlate(int netId, List<int> foodIds)
         {
-            if (!_byNetId.TryGetValue(netId, out IMovable plate) || !IsAlive(plate))
-            {
+            bool havePlate = _byNetId.TryGetValue(netId, out IMovable plate) && IsAlive(plate);
+            if (!havePlate)
                 _log.LogWarning($"Other player served plate {netId}, which this copy couldn't match.");
-                return;
-            }
             // Food sits on the plate as parts (GetPartsRecursive), not only as movables; both go.
             var parts = new List<IMovable>();
-            if (plate is Container container)
+            // v0.11.4: and the food that was on it on the server's copy, wherever it is here. Food scooped onto a
+            // plate in the hand could still sit in the pan here, and was left behind when the plate went.
+            if (foodIds != null)
+            {
+                foreach (int id in foodIds)
+                {
+                    if (_byNetId.TryGetValue(id, out IMovable food) && IsAlive(food) && !parts.Contains(food))
+                        parts.Add(food);
+                }
+            }
+            if (havePlate && plate is Container container)
             {
                 parts.AddRange(container.MovablesRecursive);
                 foreach (ProductPart food in container.GetPartsRecursive())
@@ -1274,7 +1328,12 @@ namespace CookingSimMP
                         parts.Add(food);
                 }
             }
-            parts.Add(plate);
+            if (havePlate)
+            {
+                // Let go of the plate first, so the food it carries here is thawed before it's removed.
+                parts.Remove(plate);
+                parts.Insert(0, plate);
+            }
             try
             {
                 _applyingRemoval = true;
@@ -1298,7 +1357,8 @@ namespace CookingSimMP
             {
                 _applyingRemoval = false;
             }
-            _log.LogInfo($"Other player served plate {netId}; removed it here ({parts.Count - 1} items on it).");
+            int onPlate = havePlate ? parts.Count - 1 : parts.Count;
+            _log.LogInfo($"Other player served plate {netId}; removed it here ({onPlate} items on it; {foodIds?.Count ?? 0} on theirs).");
         }
 
         private void OnRemoteHoldStart(int netId)
@@ -1325,6 +1385,8 @@ namespace CookingSimMP
             }
             // They're in charge of it now.
             _localTracks.Remove(netId);
+            // v0.11.4: taken out of a container they carry; that container stops moving it here.
+            UnpinFromCarriers(m);
 
             Transform main = PoseTransformOf(m);
             Rigidbody mainBody = MainBodyOf(m);
@@ -1411,6 +1473,16 @@ namespace CookingSimMP
                 return;
             }
 
+            if (!end)
+            {
+                float now = Time.unscaledTime;
+                float dt = now - item.LastPoseAt;
+                if (item.LastPoseAt > 0f && dt > 0.01f && dt < 0.5f)
+                    item.Velocity = Vector3.Lerp(item.Velocity, (position - item.TargetPosition) / dt, 0.5f);
+                else
+                    item.Velocity = Vector3.zero;
+                item.LastPoseAt = now;
+            }
             item.TargetPosition = position;
             item.TargetRotation = rotation;
             if (end)
@@ -1523,10 +1595,41 @@ namespace CookingSimMP
             {
                 if (!IsAlive(item.Movable) || item.Main == null)
                     continue;
-                Vector3 position = Vector3.Lerp(item.Main.position, item.TargetPosition, t);
+                Vector3 target = item.TargetPosition;
+                if (item.LastPoseAt > 0f)
+                    target += item.Velocity * Mathf.Min(Time.unscaledTime - item.LastPoseAt, MaxLead);
+                Vector3 position = Vector3.Lerp(item.Main.position, target, t);
                 Quaternion rotation = Quaternion.Slerp(item.Main.rotation, item.TargetRotation, t);
+                KeepStill(item);
                 PlaceAll(item, position, rotation);
             }
+        }
+
+        // v0.11.8: an egg the other player held slowly sank through the floor here, jumping back up with each
+        // pose: something turned its physics back on, so gravity pulled it down between our placements and its
+        // speed kept building. Every body we move by hand stays kinematic, still and without collisions.
+        private readonly HashSet<Rigidbody> _reportedLoose = new HashSet<Rigidbody>();
+
+        private void KeepStill(RemoteHeldItem item)
+        {
+            KeepStill(item, item.MainBody);
+            foreach (PinnedPart pinned in item.Pinned)
+                KeepStill(item, pinned.Body);
+        }
+
+        private void KeepStill(RemoteHeldItem item, Rigidbody body)
+        {
+            if (body == null || (body.isKinematic && !body.detectCollisions))
+                return;
+            if (!body.isKinematic)
+            {
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+                body.isKinematic = true;
+            }
+            body.detectCollisions = false;
+            if (_reportedLoose.Add(body))
+                _log.LogInfo($"Physics came back on for '{body.name}' of {item.Movable.GetType().Name} '{item.Movable.gameObject.name}' while the other player moves it; keeping it still here.");
         }
 
         private void ReleaseAllRemoteHeld()
@@ -1653,6 +1756,17 @@ namespace CookingSimMP
             {
                 if (seen.Add(body.transform))
                     AddPinned(item, body.transform, body);
+            }
+
+            // v0.11.8: food can carry rigidbodies the game doesn't list as bones (an egg's insides). Left loose they
+            // fell with gravity while the rest was placed, so the food sank through the floor here.
+            if (m is ProductPart)
+            {
+                foreach (Rigidbody extra in root.GetComponentsInChildren<Rigidbody>(true))
+                {
+                    if (extra != null && extra != item.MainBody && !extra.isKinematic && seen.Add(extra.transform))
+                        AddPinned(item, extra.transform, extra);
+                }
             }
 
             if (m is Container container)

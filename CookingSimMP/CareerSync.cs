@@ -46,6 +46,12 @@ namespace CookingSimMP
         private bool _waitingForDay;
         private float _waitedFor;
         private bool _goToMenu;
+        // v0.11.4: after going back to the menu because the host left, keep the cursor free for a moment. The game
+        // only expects the menu to be opened from the pause menu, where the cursor is already free, so it stayed
+        // locked and hidden in the menu.
+        private bool _freeCursorInMenu;
+        private float _menuCursorFor;
+        private const float MenuCursorTime = 10f;   // Covers the loading screen too.
         private GUIStyle _style;
 
         private static AccessTools.FieldRef<MultiplePerDayPerk, int> UsageField()
@@ -120,6 +126,7 @@ namespace CookingSimMP
         {
             if (_goToMenu)
                 GoToMenu();
+            FreeCursorInMenu(deltaTime);
             if (!_session.IsRunning)
                 return;
             if (_session.IsHost)
@@ -186,12 +193,27 @@ namespace CookingSimMP
             {
                 if (GameManager.Paused)
                     game.UnpauseTime();
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+                _freeCursorInMenu = true;
+                _menuCursorFor = 0f;
                 game.OpenMainMenu();
             }
             catch (Exception e)
             {
                 _log.LogWarning($"[Career] Going back to the main menu failed: {e.Message}");
             }
+        }
+
+        private void FreeCursorInMenu(float deltaTime)
+        {
+            if (!_freeCursorInMenu || GameManager.DuringGame || WorldSync.Loading)
+                return;
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+            _menuCursorFor += deltaTime;
+            if (_menuCursorFor >= MenuCursorTime)
+                _freeCursorInMenu = false;
         }
 
         // ---------- Perks ----------

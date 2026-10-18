@@ -376,6 +376,9 @@ namespace CookingSimMP
         {
             if (Player.Me != null && ReferenceEquals(Player.Me.ActiveMovable, movable))
                 return true;
+            // Carried in a container the other player holds (v0.11.4: food scooped onto their plate).
+            if (IsFrozen(MainBodyOf(movable)))
+                return true;
             if (!_netIdOf.TryGetValue(movable, out int netId))
                 return false;
             return _remoteHeld.ContainsKey(netId) || (_localTracks.TryGetValue(netId, out LocalTrack track) && (track.InHand || track.Sending));

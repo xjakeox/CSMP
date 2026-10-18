@@ -10,6 +10,11 @@ namespace CookingSimMP
     // under the maximum. While the host's RecipesManager.Update runs, that total is divided by 1 + 0.5 per client,
     // so the kitchen takes 1.5x the work at once with two players and orders keep coming at that rate.
     //
+    // v0.11.4: that alone barely changed anything. The game draws one order at a time and waits a random gap
+    // (FameInfo.firstRecipeMin..Max) before it arrives, and the next one is only drawn once that one has started. So
+    // unless the kitchen is full, the gap sets the pace, not the workload cap. The gap is now divided by the same
+    // multiplier (RecipesManager.TryDrawRecipe), so orders also arrive 1.5x as often.
+    //
     // Host only (the client draws no orders), not in sandbox (orders there are picked by hand), and only while a
     // client is connected. The host can turn it off from its pause menu; the setting is saved in the config file.
     internal sealed partial class OrderSync
@@ -23,6 +28,7 @@ namespace CookingSimMP
         private void PatchMoreOrders()
         {
             Patch(typeof(RecipesManager), "Update", prefix: nameof(OrderPatches.MoreOrdersUpdatePrefix), postfix: nameof(OrderPatches.MoreOrdersUpdatePostfix));
+            Patch(typeof(RecipesManager), nameof(RecipesManager.TryDrawRecipe), postfix: nameof(OrderPatches.TryDrawRecipePostfix));
             try
             {
                 _harmony.Patch(AccessTools.PropertyGetter(typeof(RecipesManager), nameof(RecipesManager.CurrentDishIntensity)),
@@ -51,6 +57,20 @@ namespace CookingSimMP
         }
 
         internal static void EndOrderDraw() => _loadDivisor = 1f;
+
+        // A new order was drawn: bring its arrival closer by the multiplier.
+        internal static void ShortenGap(RecipesManager manager, RecipesManager.RecipeStart start)
+        {
+            float multiplier = Instance != null ? Instance.OrderMultiplier : 1f;
+            if (start == null || manager == null || multiplier <= 1f)
+                return;
+            float now = manager.ServeTime;
+            float gap = start.time - now;
+            if (gap <= 0f)
+                return;
+            start.time = now + gap / multiplier;
+            Instance._log.LogInfo($"[Orders] Next order in {gap / multiplier:0}s instead of {gap:0}s ({multiplier:0.#}x orders for {1 + Instance._session.PeerCount} players).");
+        }
 
         internal static float ScaleLoad(float load) => _loadDivisor > 1f ? load / _loadDivisor : load;
 
@@ -95,6 +115,18 @@ namespace CookingSimMP
         }
 
         public static void MoreOrdersUpdatePostfix() => OrderSync.EndOrderDraw();
+
+        public static void TryDrawRecipePostfix(RecipesManager __instance, RecipesManager.RecipeStart __result)
+        {
+            try
+            {
+                OrderSync.ShortenGap(__instance, __result);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[CookingSimMP] [Orders] more-orders gap patch error: " + e);
+            }
+        }
 
         public static void CurrentDishIntensityPostfix(ref float __result) => __result = OrderSync.ScaleLoad(__result);
     }

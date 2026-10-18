@@ -194,6 +194,16 @@ v0.11.2: a mixture the client blends shows in the host's pot (it was only in the
 
 v0.11.3: each other player's chef has a name tag above it with their Steam name ("Player" if they have none), in their chef colour.
 
+v0.11.4: food scooped onto a plate in the hand moves onto the plate on the other screen straight away, and serving a plate takes all of its food on both screens; more orders now also arrive more often (the wait before each new order is divided by the same 1.5x); when the host leaves, the client's mouse works in the main menu; held items are sent 30 times a second and lead slightly between updates, so the spatula and other tools trail the hand less online.
+
+v0.11.5: cartons, bottles and shakers bought from a shelf now appear on the other screen and in the buyer's hand there; the sink no longer fills pots twice; fixed an error in v0.11.4 that briefly stopped item syncing whenever food landed in a carried plate.
+
+v0.11.6: the client gets the pouring tooltip at the sink again (its sink water fills its own pot but isn't sent; the host's amount comes back with the pot).
+
+v0.11.7: the sink fills at the right rate again while keeping the client's tooltip (the client's sink water only shows the tooltip; the host's water fills the pot); cracking an egg syncs every stage: the egg goes, the shells, yolk and the fried or peeled egg appear on both screens, and an egg the other player holds or throws only cracks on their copy; pieces of a plate or glass that breaks during play can be picked up and moved by either player.
+
+v0.11.8: the sink no longer fills twice as fast when the client fills a pot (the client's sink stream is now found reliably, and a tap turned off and on quickly no longer starts a second stream); an egg the other player holds no longer sinks through the floor on your screen; egg shells land in the same place on both screens; broken pieces of anything the client bought can now be picked up and moved by either player.
+
 See `v0.11-testing.md` for the v0.11 test plan.
 
 | Key | Action |

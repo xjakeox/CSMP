@@ -4,6 +4,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using BepInEx.Configuration;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace CookingSimMP
 {
@@ -35,6 +36,7 @@ namespace CookingSimMP
         private bool _savedLocked;
         private bool _savedCursorLocked;
         private bool _savedCursorVisible;
+        private string _savedScene;           // Scene the input state above belongs to.
 
         private GUIStyle _windowStyle;
         private GUIStyle _labelStyle;
@@ -117,6 +119,7 @@ namespace CookingSimMP
         {
             _savedCursorLocked = Cursor.lockState == CursorLockMode.Locked;
             _savedCursorVisible = Cursor.visible;
+            _savedScene = SceneManager.GetActiveScene().name;
             try
             {
                 KitchenInputService input = KitchenInput();
@@ -137,6 +140,15 @@ namespace CookingSimMP
 
         private void RestoreGameInput()
         {
+            // v0.11.4: the window outlived its scene (the host left, so this copy went back to the main menu while
+            // "Lost connection" was open). The saved kitchen state would lock the cursor in the menu, and the old
+            // kitchen's input service may still answer, so leave the cursor free and the new scene's input alone.
+            if (SceneManager.GetActiveScene().name != _savedScene)
+            {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+                return;
+            }
             try
             {
                 KitchenInputService input = KitchenInput();

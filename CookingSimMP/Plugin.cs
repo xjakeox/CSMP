@@ -11,7 +11,7 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "com.jake.cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.11.3";
+        public const string PluginVersion = "0.11.8";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;

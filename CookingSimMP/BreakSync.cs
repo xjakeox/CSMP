@@ -44,6 +44,16 @@ namespace CookingSimMP
         }
 
         private static readonly Dictionary<FracturedDummyMovable, PieceOrigin> Origins = new Dictionary<FracturedDummyMovable, PieceOrigin>();
+
+        // v0.11.7: pieces of a break during play had no IDs, so picking one up wasn't sent (the other screen's piece
+        // stayed put). Both copies break the same item into the same pieces in the same order, so each piece now
+        // gets an ID made from the broken item's ID and its place in that order, the same on both copies.
+        private const int PieceIdBase = 100_000_000;
+        private const int MaxPiecesPerItem = 64;
+        private static readonly Dictionary<IMovable, int> Breaking = new Dictionary<IMovable, int>();
+        // Item IDs up to about 32 million fit before a piece ID overflows; pieces themselves (100,000,000 and up) don't.
+        private const int MaxItemIdWithPieces = (int.MaxValue - PieceIdBase) / MaxPiecesPerItem;
+        internal static int PieceId(int itemId, int index) => PieceIdBase + itemId * MaxPiecesPerItem + index;
         private static int _breakNo;
 
         public BreakSync(NetSession session, ItemSync items, ManualLogSource log)
@@ -95,6 +105,22 @@ namespace CookingSimMP
                 Origins.Remove(dead.Key);
             for (int i = 0; i < pieces.Length; i++)
                 Origins[pieces[i]] = new PieceOrigin { Kind = kind, AssetId = parent.AssetId, BreakNo = breakNo, Index = i };
+
+            // Pieces of pieces would overflow the ID range; those stay local. (v0.11.8: this used to stop at
+            // 1,562,500, which left out everything a client bought, IDs 2,000,000 and up, so their pieces never synced.)
+            if (Breaking.TryGetValue(parent, out int itemId) && itemId >= 0 && itemId < MaxItemIdWithPieces)
+            {
+                Breaking.Remove(parent);
+                int bound = 0;
+                for (int i = 0; i < pieces.Length && i < MaxPiecesPerItem; i++)
+                {
+                    if (pieces[i] == null)
+                        continue;
+                    Instance?._items.Bind(PieceId(itemId, i), pieces[i]);
+                    bound++;
+                }
+                Instance?._log.LogInfo($"[Breaks] Item {itemId} broke into {pieces.Length} piece(s); {bound} can be picked up by either player.");
+            }
         }
 
         // Host, right after the item table: every piece in it that this copy knows the origin of.
@@ -214,7 +240,16 @@ namespace CookingSimMP
                 return true;
             // The other player has it in hand or in flight: their copy decides whether it breaks.
             IMovable m = physics.Movable;
-            return m == null || !_items.IsRemoteHeld(m);
+            if (m != null && _items.IsRemoteHeld(m))
+                return false;
+            if (m != null && _items.TryGetNetId(m, out int netId))
+            {
+                // A break that made no pieces never clears its entry; don't let those pile up.
+                if (Breaking.Count > 32)
+                    Breaking.Clear();
+                Breaking[m] = netId;
+            }
+            return true;
         }
 
         private void OnLocalBroken(IMovable movable)
@@ -253,6 +288,7 @@ namespace CookingSimMP
             if (!_items.TryGetItem(netId, out IMovable m) || m.PhysicsController == null)
                 return;
             _items.DropItem(netId);
+            Breaking[m] = netId;
             m.gameObject.transform.SetPositionAndRotation(position, rotation);
             Applying = true;
             try
