@@ -166,7 +166,7 @@ namespace CookingSimMP
             return seconds;
         }
 
-        private void OnClock(NetPacketReader reader)
+        private void OnClock(NetDataReader reader)
         {
             long ticks = reader.GetLong();
             var phase = (DayTimeType)reader.GetByte();
@@ -227,7 +227,7 @@ namespace CookingSimMP
 
         // ---------- Messages ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             switch (type)
             {

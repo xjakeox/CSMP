@@ -407,7 +407,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnWorldBegin(NetPacketReader reader)
+        private void OnWorldBegin(NetDataReader reader)
         {
             int transferId = reader.GetInt();
             int size = reader.GetInt();
@@ -439,7 +439,7 @@ namespace CookingSimMP
             _log.LogInfo($"[World] Receiving the host's world ({size / 1024} KB, kitchen {kitchenId}, {gameState}).");
         }
 
-        private void OnWorldChunk(NetPacketReader reader)
+        private void OnWorldChunk(NetDataReader reader)
         {
             int transferId = reader.GetInt();
             int offset = reader.GetInt();
@@ -559,7 +559,7 @@ namespace CookingSimMP
             return _session.IsHost ? _joining.ContainsKey(peerId) || _waiting.Contains(peerId) : Loading;
         }
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             switch (type)
             {

@@ -206,7 +206,7 @@ namespace CookingSimMP
 
         // ---------- Messages ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             switch (type)
             {

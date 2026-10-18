@@ -165,7 +165,7 @@ namespace CookingSimMP
 
         // Client: rebuild the host's pieces. One fresh copy of the broken item per break gives its shards; the
         // pieces needed are taken out of them and placed where the host has them, and the copy is thrown away.
-        private void OnPieces(NetPacketReader reader)
+        private void OnPieces(NetDataReader reader)
         {
             int count = reader.GetInt();
             var entries = new List<PieceEntry>();
@@ -276,7 +276,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnRemoteBroken(NetPacketReader reader)
+        private void OnRemoteBroken(NetDataReader reader)
         {
             int netId = reader.GetInt();
             var position = new Vector3(reader.GetFloat(), reader.GetFloat(), reader.GetFloat());
@@ -302,7 +302,7 @@ namespace CookingSimMP
             _log.LogInfo($"[Breaks] Other player broke item {netId}; broke it here too.");
         }
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (!Handles(type) || !Active)
                 return;

@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
 using BepInEx.Logging;
 using LiteNetLib;
 using LiteNetLib.Utils;
@@ -70,23 +68,25 @@ namespace CookingSimMP
         Bankrupt = 56,         // Host -> client: the restaurant went bankrupt; run the game's bankruptcy here too.
     }
 
-    // Owns the LiteNetLib connection. Events only fire inside Poll(), which runs on Unity's main thread.
-    internal sealed class NetSession
-    {
-        private const string ConnectionKey = "CSMP-v1";
 
+    // Owns the connection: the hello, the version check and the list of peers. Moving the bytes is the transport's job
+    // (v0.12): Steam (SteamTransport) or Direct IP (DirectTransport, LiteNetLib). Events only fire inside Poll(), which
+    // runs on Unity's main thread.
+    internal sealed class NetSession : ITransportSink
+    {
         public static readonly int ProcessId = Process.GetCurrentProcess().Id;
 
         private readonly ManualLogSource _log;
-        private readonly EventBasedNetListener _listener = new EventBasedNetListener();
-        private readonly NetManager _net;
+        private readonly DirectTransport _direct;
+        private readonly SteamTransport _steam;
+        private ITransport _transport;   // The one in use; null when not connected.
         private readonly NetDataWriter _writer = new NetDataWriter();
         private bool _isHost;
         private bool _stopAfterPoll;
         private bool _verified;          // Client: the host answered our hello with the same version.
-        private string _joinTarget;      // Client: "address:port" we're connecting to, for error messages.
+        private string _joinTarget;      // Client: who we're connecting to ("address:port" or the host's Steam name), for error messages.
         private bool _problemShown;      // Client: a clearer reason is already on screen; don't replace it with the disconnect.
-        private readonly Dictionary<int, NetPeer> _peers = new Dictionary<int, NetPeer>();
+        private readonly HashSet<int> _peers = new HashSet<int>();
         // Each peer's Steam name from their hello (v0.11.3), for the name tag over their chef. Empty if they had none.
         private readonly Dictionary<int, string> _peerNames = new Dictionary<int, string>();
 
@@ -104,15 +104,18 @@ namespace CookingSimMP
         // ConnectWindows shows it on screen (v0.10); before, most of these were only in the log.
         public event Action<string, string, bool> ConnectProblem;
         // Every message type NetSession doesn't handle itself goes here.
-        public event Action<int, MessageType, NetPacketReader> MessageReceived;
+        public event Action<int, MessageType, NetDataReader> MessageReceived;
         // Client: the host left (closed the game, stopped hosting, timed out) after we were in. Not raised for F12.
         public event Action HostLost;
 
         public bool IsHost => _isHost;
 
-        public bool IsRunning => _net.IsRunning;
+        public bool IsRunning => _transport != null && _transport.IsRunning;
 
-        public bool IsConnected => _net.IsRunning && _net.ConnectedPeersCount > 0;
+        public bool IsConnected => IsRunning && _peers.Count > 0;
+
+        // Steam or Direct; only meaningful while running.
+        public TransportKind Kind => _transport?.Kind ?? TransportKind.Steam;
 
         // Players connected to this copy (host: the clients; client: 1, the host).
         public int PeerCount => _peers.Count;
@@ -124,77 +127,130 @@ namespace CookingSimMP
         public NetSession(ManualLogSource log)
         {
             _log = log;
-            _net = new NetManager(_listener);
-            _listener.ConnectionRequestEvent += OnConnectionRequest;
-            _listener.PeerConnectedEvent += OnPeerConnected;
-            _listener.PeerDisconnectedEvent += OnPeerDisconnected;
-            _listener.NetworkReceiveEvent += OnNetworkReceive;
-            _listener.NetworkErrorEvent += OnNetworkError;
+            _direct = new DirectTransport(log, this);
+            _steam = new SteamTransport(log, this);
         }
 
         private string Role => _isHost ? "host" : "client";
 
-        public void StartHost(int port)
+        // Shared checks before hosting or joining. False (with the reason shown) if this copy can't start now.
+        private bool CanStart(bool host)
         {
-            if (_net.IsRunning)
+            if (IsRunning)
             {
                 _log.LogWarning($"Already running as {Role}. Press F12 to disconnect first.");
-                return;
+                return false;
             }
             // Joining players load the host's world, so there has to be one.
-            if (!WorldSync.HostInKitchen)
+            if (host && !WorldSync.HostInKitchen)
             {
                 _log.LogWarning("Load a kitchen before hosting.");
                 PauseSync.Instance?.Notify("Load a kitchen before hosting");
+                return false;
+            }
+            return true;
+        }
+
+        // Host through Steam (v0.12): friends join with this player's SteamID64.
+        public void StartSteamHost()
+        {
+            if (!CanStart(host: true))
+                return;
+            string why = SteamTransport.Unavailable();
+            if (why != null || !_steam.StartHost())
+            {
+                why = why ?? "Steam wouldn't open a connection for hosting. Restart Steam and the game, or use Direct IP.";
+                _log.LogError($"Couldn't host through Steam: {why}");
+                ConnectProblem?.Invoke("Couldn't start hosting", why, false);
                 return;
             }
-            if (!_net.Start(port))
+            _transport = _steam;
+            _isHost = true;
+            _log.LogInfo($"Hosting through Steam (Steam ID {SteamTransport.LocalSteamId()}). Waiting for a player to join...");
+        }
+
+        // Host on a UDP port (Direct IP: LAN, Tailscale, port forwarding).
+        public void StartHost(int port)
+        {
+            if (!CanStart(host: true))
+                return;
+            if (!_direct.StartHost(port))
             {
                 _log.LogError($"Could not open UDP port {port}. Another copy may already be hosting on it.");
                 ConnectProblem?.Invoke("Couldn't start hosting",
                     $"UDP port {port} is already in use. Another copy of the game (or another program) may already be hosting on it. Close it, or change the port in BepInEx\\config\\cookingsimmp.cfg.", false);
                 return;
             }
+            _transport = _direct;
             _isHost = true;
             _log.LogInfo($"Hosting on UDP port {port}. Waiting for a player to join...");
         }
 
+        // Join a host through Steam by their SteamID64 (v0.12).
+        public void JoinSteam(ulong hostSteamId)
+        {
+            if (!CanStart(host: false))
+                return;
+            string why = SteamTransport.Unavailable();
+            if (why == null && hostSteamId == SteamTransport.LocalSteamId())
+                why = "That's your own Steam ID. Paste the Steam ID shown in the host's F10 window.";
+            if (why != null)
+            {
+                _log.LogWarning($"Couldn't join through Steam: {why}");
+                ConnectProblem?.Invoke("Couldn't connect", why, true);
+                return;
+            }
+            BeginJoin(SteamTransport.NameOf(hostSteamId));
+            if (!_steam.Join(hostSteamId))
+            {
+                _log.LogError("Steam wouldn't create the connection.");
+                ConnectProblem?.Invoke("Couldn't connect", "Steam wouldn't start the connection. Check that Steam is online, then try again.", true);
+                return;
+            }
+            _transport = _steam;
+            PauseSync.Instance?.Notify("Connecting through Steam...");
+        }
+
+        // Join a host by IP address and port (Direct IP).
         public void Join(string address, int port)
         {
-            if (_net.IsRunning)
-            {
-                _log.LogWarning($"Already running as {Role}. Press F12 to disconnect first.");
+            if (!CanStart(host: false))
                 return;
-            }
-            if (!_net.Start())
-            {
-                _log.LogError("Could not open a local UDP port to connect from.");
-                ConnectProblem?.Invoke("Couldn't connect", "This PC couldn't open a network port to connect from. A firewall or security program may be blocking the game.", true);
-                return;
-            }
-            _isHost = false;
-            _verified = false;
-            _problemShown = false;
-            _joinTarget = $"{address}:{port}";
+            BeginJoin($"{address}:{port}");
             _log.LogInfo($"Connecting to {address}:{port}...");
             try
             {
-                if (_net.Connect(address, port, ConnectionKey) == null)
-                    throw new Exception("no connection was created");
+                if (!_direct.Join(address, port))
+                {
+                    _log.LogError("Could not open a local UDP port to connect from.");
+                    ConnectProblem?.Invoke("Couldn't connect", "This PC couldn't open a network port to connect from. A firewall or security program may be blocking the game.", true);
+                    return;
+                }
+                _transport = _direct;
             }
             catch (Exception e)
             {
+                _transport = _direct;
                 _log.LogWarning($"Couldn't connect to {address}:{port}: {e.Message}");
                 ConnectProblem?.Invoke("Couldn't connect", $"\"{address}\" isn't an address this PC can connect to ({e.Message}). Check the host's IP address and try again.", true);
                 _stopAfterPoll = true;
             }
         }
 
+        private void BeginJoin(string target)
+        {
+            _isHost = false;
+            _verified = false;
+            _problemShown = false;
+            _joinTarget = target;
+        }
+
         public void Stop()
         {
-            if (!_net.IsRunning)
+            if (!IsRunning)
                 return;
-            _net.Stop();
+            _transport.Stop();
+            _transport = null;
             _peers.Clear();
             _peerNames.Clear();
             _log.LogInfo("Disconnected and stopped networking.");
@@ -209,19 +265,20 @@ namespace CookingSimMP
         // Send the current message to one peer only.
         public void SendTo(int peerId, DeliveryMethod deliveryMethod)
         {
-            if (_peers.TryGetValue(peerId, out NetPeer peer))
-                peer.Send(_writer, deliveryMethod);
+            if (_peers.Contains(peerId))
+                _transport?.Send(peerId, _writer, deliveryMethod);
         }
 
         public void Poll()
         {
-            if (_net.IsRunning)
-                _net.PollEvents();
+            if (IsRunning)
+                _transport.Poll();
             // Stopping from inside an event callback isn't safe, so it waits until polling is done.
             if (_stopAfterPoll)
             {
                 _stopAfterPoll = false;
                 Stop();
+                _transport = null;
             }
         }
 
@@ -231,7 +288,7 @@ namespace CookingSimMP
             _writer.Reset();
             _writer.Put((byte)MessageType.PlayerState);
             state.Write(_writer);
-            _net.SendToAll(_writer, DeliveryMethod.Sequenced);
+            _transport?.SendToAll(_writer, DeliveryMethod.Sequenced);
         }
 
         // Start a message: write its fields into the returned writer, then call SendToAll.
@@ -244,43 +301,39 @@ namespace CookingSimMP
 
         public void SendToAll(DeliveryMethod deliveryMethod)
         {
-            _net.SendToAll(_writer, deliveryMethod);
+            _transport?.SendToAll(_writer, deliveryMethod);
         }
 
-        private void OnConnectionRequest(ConnectionRequest request)
-        {
-            _log.LogInfo($"Connection request from {request.RemoteEndPoint}.");
-            request.AcceptIfKey(ConnectionKey);
-        }
+        // ---------- From the transport ----------
 
-        private void OnPeerConnected(NetPeer peer)
+        void ITransportSink.OnPeerConnected(int peerId)
         {
-            _log.LogInfo($"Connected to peer {peer.Id} as {Role}. Sending hello.");
+            _log.LogInfo($"Connected to peer {peerId} as {Role}. Sending hello.");
+            _peers.Add(peerId);
             _writer.Reset();
             _writer.Put((byte)MessageType.Hello);
             _writer.Put($"hello from {Role} (process {ProcessId})");
             _writer.Put(Plugin.PluginVersion);
             _writer.Put(PauseSync.SteamName() ?? string.Empty);
-            peer.Send(_writer, DeliveryMethod.ReliableOrdered);
-            _peers[peer.Id] = peer;
-            PeerJoined?.Invoke(peer.Id);
+            _transport.Send(peerId, _writer, DeliveryMethod.ReliableOrdered);
+            PeerJoined?.Invoke(peerId);
         }
 
-        private void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
+        void ITransportSink.OnPeerDisconnected(int peerId, PeerLeftReason reason, string detail)
         {
-            _log.LogInfo($"Peer {peer.Id} disconnected: {info.Reason}.");
-            _peers.Remove(peer.Id);
-            _peerNames.Remove(peer.Id);
-            PeerLeft?.Invoke(peer.Id);
+            _log.LogInfo($"Peer {peerId} disconnected: {reason} ({detail}).");
+            _peers.Remove(peerId);
+            _peerNames.Remove(peerId);
+            PeerLeft?.Invoke(peerId);
             // A client with no host left has nothing to do; stop so F10/F11 work again without F12.
             if (!_isHost)
             {
-                if (info.Reason == DisconnectReason.ConnectionFailed)
+                if (reason == PeerLeftReason.ConnectFailed)
                     _log.LogWarning("Couldn't reach the host. Is the other copy hosting (F10)? Press F11 to try again.");
                 bool wasIn = _verified;
-                ExplainClientDisconnect(info);
+                ExplainClientDisconnect(reason);
                 _stopAfterPoll = true;
-                if (wasIn && info.Reason != DisconnectReason.DisconnectPeerCalled)
+                if (wasIn && reason != PeerLeftReason.LocalStop)
                     HostLost?.Invoke();
             }
         }
@@ -294,65 +347,77 @@ namespace CookingSimMP
             ConnectProblem?.Invoke(title, text, canRetry);
         }
 
-        // Client: puts the reason the connection ended on screen. Pressing F12 here (DisconnectPeerCalled) needs none.
-        private void ExplainClientDisconnect(DisconnectInfo info)
+        // Client: puts the reason the connection ended on screen. Pressing F12 here (LocalStop) needs none.
+        private void ExplainClientDisconnect(PeerLeftReason reason)
         {
             string target = _joinTarget ?? "the host";
+            bool steam = Kind == TransportKind.Steam;
             bool wasIn = _verified;
             _verified = false;
-            if (ConnectProblem == null || info.Reason == DisconnectReason.DisconnectPeerCalled || _problemShown)
+            if (ConnectProblem == null || reason == PeerLeftReason.LocalStop || _problemShown)
                 return;
             if (wasIn)
             {
-                string why = info.Reason == DisconnectReason.Timeout
+                string why = reason == PeerLeftReason.Timeout
                     ? "The host stopped answering (its game may have closed, or the network dropped)."
-                    : info.Reason == DisconnectReason.RemoteConnectionClose
+                    : reason == PeerLeftReason.RemoteClosed
                         ? "The host stopped hosting or closed the game."
-                        : $"The connection ended ({info.Reason}).";
+                        : reason == PeerLeftReason.SteamProblem
+                            ? "Steam lost its connection (it may have gone offline)."
+                            : $"The connection ended ({reason}).";
                 ConnectProblem("Lost connection to the host", why + " You can join again with F11 once the host is back.", true);
                 return;
             }
             string text;
-            switch (info.Reason)
+            switch (reason)
             {
-                case DisconnectReason.ConnectionFailed:
-                case DisconnectReason.Timeout:
-                    text = $"Nobody answered at {target}. Check that the host is in a kitchen and has clicked Host (F10), that the IP address is right, and that both PCs are on the same network or VPN (Tailscale). Over the internet, the host needs UDP port forwarding.";
+                case PeerLeftReason.ConnectFailed:
+                case PeerLeftReason.Timeout:
+                    text = steam
+                        ? $"Nobody answered at {target}. Check that the host is in a kitchen and has clicked Host (F10) with Steam selected, and that you pasted the Steam ID from their host window."
+                        : $"Nobody answered at {target}. Check that the host is in a kitchen and has clicked Host (F10), that the IP address is right, and that both PCs are on the same network or VPN (Tailscale). Over the internet, the host needs UDP port forwarding.";
                     break;
-                case DisconnectReason.HostUnreachable:
-                case DisconnectReason.NetworkUnreachable:
-                    text = $"{target} can't be reached from this PC. Check the IP address and that this PC is online (and on the VPN, if you use one).";
+                case PeerLeftReason.Unreachable:
+                    text = steam
+                        ? $"Steam couldn't find a route to {target}. Check that both of you are online in Steam, then try again."
+                        : $"{target} can't be reached from this PC. Check the IP address and that this PC is online (and on the VPN, if you use one).";
                     break;
-                case DisconnectReason.UnknownHost:
+                case PeerLeftReason.SteamProblem:
+                    text = "Steam couldn't set up the connection. It may be offline or having trouble reaching its relay network. Check that Steam is online, then try again.";
+                    break;
+                case PeerLeftReason.UnknownHost:
                     text = $"\"{target}\" isn't a known address. Type the host's IP address, for example 100.101.102.103.";
                     break;
-                case DisconnectReason.ConnectionRejected:
-                case DisconnectReason.InvalidProtocol:
-                    text = $"The host at {target} refused the connection. It may be running a different multiplayer mod or a very old CSMP version.";
+                case PeerLeftReason.Rejected:
+                    text = steam
+                        ? $"{target} refused the connection. They may be running a CSMP version older than 0.12, which can't host through Steam."
+                        : $"The host at {target} refused the connection. It may be running a different multiplayer mod or a very old CSMP version.";
                     break;
-                case DisconnectReason.RemoteConnectionClose:
+                case PeerLeftReason.RemoteClosed:
                     text = "The host closed the connection while you were joining. If a message about versions or DLC showed up, fix that first.";
                     break;
                 default:
-                    text = $"The connection to {target} ended before you could join ({info.Reason}).";
+                    text = $"The connection to {target} ended before you could join ({reason}).";
                     break;
             }
             ConnectProblem("Couldn't connect", text, true);
         }
 
-        private void OnNetworkReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod deliveryMethod)
+        void ITransportSink.OnReceive(int peerId, NetDataReader reader)
         {
+            if (reader.AvailableBytes < 1)
+                return;
             var type = (MessageType)reader.GetByte();
             switch (type)
             {
                 case MessageType.Hello:
-                    OnHello(peer, reader);
+                    OnHello(peerId, reader);
                     break;
                 case MessageType.PlayerState:
-                    PlayerStateReceived?.Invoke(peer.Id, PlayerState.Read(reader));
+                    PlayerStateReceived?.Invoke(peerId, PlayerState.Read(reader));
                     break;
                 default:
-                    if (DropMessage != null && DropMessage(peer.Id, type))
+                    if (DropMessage != null && DropMessage(peerId, type))
                         break;
                     if (MessageReceived != null)
                     {
@@ -362,32 +427,31 @@ namespace CookingSimMP
                         {
                             try
                             {
-                                ((Action<int, MessageType, NetPacketReader>)handler)(peer.Id, type, reader);
+                                ((Action<int, MessageType, NetDataReader>)handler)(peerId, type, reader);
                             }
                             catch (Exception e)
                             {
-                                _log.LogError($"Handling {type} from peer {peer.Id} failed in {handler.Method.DeclaringType?.Name}: {e}");
+                                _log.LogError($"Handling {type} from peer {peerId} failed in {handler.Method.DeclaringType?.Name}: {e}");
                             }
                         }
                         break;
                     }
-                    _log.LogWarning($"Unknown message type {(byte)type} from peer {peer.Id}.");
+                    _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
                     break;
             }
-            reader.Recycle();
         }
 
         // Both copies must run the same mod version; v0.8.5 and older don't send one.
-        private void OnHello(NetPeer peer, NetPacketReader reader)
+        private void OnHello(int peerId, NetDataReader reader)
         {
-            _log.LogInfo($"Received from peer {peer.Id}: \"{reader.GetString(256)}\"");
+            _log.LogInfo($"Received from peer {peerId}: \"{reader.GetString(256)}\"");
             string theirs = reader.AvailableBytes > 0 ? reader.GetString(32) : "0.8.5 or older";
             // v0.11.3 and newer add the sender's Steam name.
-            _peerNames[peer.Id] = reader.AvailableBytes > 0 ? reader.GetString(64) : string.Empty;
+            _peerNames[peerId] = reader.AvailableBytes > 0 ? reader.GetString(64) : string.Empty;
             if (theirs == Plugin.PluginVersion)
             {
                 _verified = true;
-                PeerVerified?.Invoke(peer.Id);
+                PeerVerified?.Invoke(peerId);
                 return;
             }
             string text = _isHost
@@ -396,17 +460,12 @@ namespace CookingSimMP
             _log.LogWarning(text);
             PauseSync.Instance?.Notify(text, 10f);
             if (_isHost)
-                peer.Disconnect();
+                _transport.Disconnect(peerId);
             else
             {
                 ReportProblem("Different CSMP versions", text + " Install the same CSMP version on both PCs.", false);
                 _stopAfterPoll = true;
             }
-        }
-
-        private void OnNetworkError(IPEndPoint endPoint, SocketError socketError)
-        {
-            _log.LogError($"Network error with {endPoint}: {socketError}.");
         }
     }
 }

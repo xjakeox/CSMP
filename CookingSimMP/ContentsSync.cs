@@ -419,7 +419,7 @@ namespace CookingSimMP
         }
 
         // Host: add the client's pours to this copy's pots, then send everyone the merged contents.
-        private void OnAdds(NetPacketReader reader)
+        private void OnAdds(NetDataReader reader)
         {
             int token = reader.GetInt();
             int count = reader.GetInt();
@@ -482,7 +482,7 @@ namespace CookingSimMP
 
         // ---------- Receiving ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (type == MessageType.ContentsAdd)
             {

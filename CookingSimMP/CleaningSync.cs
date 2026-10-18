@@ -234,7 +234,7 @@ namespace CookingSimMP
 
         // ---------- Other player's stroke: paint it here ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (type != MessageType.PaintStrokes)
                 return;

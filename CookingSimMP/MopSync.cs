@@ -142,7 +142,7 @@ namespace CookingSimMP
 
         // ---------- Their mop: follow it ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (type != MessageType.MopState)
                 return;

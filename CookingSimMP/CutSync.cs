@@ -118,7 +118,7 @@ namespace CookingSimMP
 
         // ---------- Other player's cut: repeat it ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (type != MessageType.CutDone)
                 return;

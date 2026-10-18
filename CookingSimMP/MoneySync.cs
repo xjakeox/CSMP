@@ -160,7 +160,7 @@ namespace CookingSimMP
 
         // ---------- Receiving ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             switch (type)
             {
@@ -179,7 +179,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnClientRequest(NetPacketReader reader)
+        private void OnClientRequest(NetDataReader reader)
         {
             int token = reader.GetInt();
             int seq = reader.GetInt();
@@ -191,7 +191,7 @@ namespace CookingSimMP
             SendChange(delta, type, token, seq);
         }
 
-        private void OnHostChange(NetPacketReader reader)
+        private void OnHostChange(NetDataReader reader)
         {
             float delta = reader.GetFloat();
             var type = (PlayerStats.CashType)reader.GetByte();

@@ -178,7 +178,7 @@ namespace CookingSimMP
 
         // ---------- Client: copy the host's condition ----------
 
-        private void OnStates(NetPacketReader reader)
+        private void OnStates(NetDataReader reader)
         {
             int count = reader.GetInt();
             for (int i = 0; i < count; i++)
@@ -244,7 +244,7 @@ namespace CookingSimMP
 
         // ---------- Host: knocks on the client's copy ----------
 
-        private void OnHits(NetPacketReader reader)
+        private void OnHits(NetDataReader reader)
         {
             int count = reader.GetInt();
             for (int i = 0; i < count; i++)
@@ -276,7 +276,7 @@ namespace CookingSimMP
             _log.LogInfo($"[Stands] {(type == MessageType.RepairStart ? "Called a repair for" : "Stopped the repair of")} {r.gameObject.name} ({r.destructibleBase.ID}) here; told the other player.");
         }
 
-        private void OnRepair(MessageType type, NetPacketReader reader)
+        private void OnRepair(MessageType type, NetDataReader reader)
         {
             int id = reader.GetInt();
             int company = reader.GetInt();
@@ -330,7 +330,7 @@ namespace CookingSimMP
 
         // ---------- Messages ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (!Handles(type) || !Active)
                 return;

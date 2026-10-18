@@ -2,14 +2,19 @@ using System;
 using System.Collections.Generic;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text.RegularExpressions;
 using BepInEx.Configuration;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CookingSimMP
 {
-    // F10 opens a "start hosting?" window listing the addresses others can join with; F11 opens a window
-    // to type the host's address. Both free the mouse and block the game's clicks while open.
+    // F10 opens a "start hosting?" window; F11 opens a window to enter the host. Both free the mouse and block the
+    // game's clicks while open.
+    //
+    // v0.12: both windows have two tabs. Steam (the default) hosts through Steam: the host's window shows their Steam
+    // ID with a Copy button, and the friend pastes it. Direct IP is the old way: the host's addresses and port, and the
+    // friend types one (LAN, Tailscale, port forwarding, or two copies on one PC).
     //
     // When connecting fails or the connection is lost, an error window says why (v0.10), with Try again (back to
     // the join window) where that makes sense.
@@ -22,6 +27,8 @@ namespace CookingSimMP
         private readonly NetSession _session;
         private readonly ConfigEntry<string> _hostAddress;
         private readonly ConfigEntry<int> _port;
+        private readonly ConfigEntry<TransportKind> _connection;
+        private readonly ConfigEntry<string> _hostSteamId;
 
         private Window _open;
         private string _joinText = "";
@@ -31,6 +38,9 @@ namespace CookingSimMP
         private string _errorTitle;
         private string _errorText;
         private bool _errorCanRetry;
+        private string _steamProblem;         // Why Steam can't be used right now, or null.
+        private ulong _ownSteamId;
+        private float _copiedAt = -10f;        // When "Copy Steam ID" was last clicked, for the "Copied" label.
 
         // Game input state saved while a window is open.
         private bool _savedLocked;
@@ -42,14 +52,18 @@ namespace CookingSimMP
         private GUIStyle _labelStyle;
         private GUIStyle _fieldStyle;
         private GUIStyle _buttonStyle;
+        private GUIStyle _idStyle;
 
         internal static bool AnyOpen;
 
-        public ConnectWindows(NetSession session, ConfigEntry<string> hostAddress, ConfigEntry<int> port)
+        public ConnectWindows(NetSession session, ConfigEntry<string> hostAddress, ConfigEntry<int> port,
+            ConfigEntry<TransportKind> connection, ConfigEntry<string> hostSteamId)
         {
             _session = session;
             _hostAddress = hostAddress;
             _port = port;
+            _connection = connection;
+            _hostSteamId = hostSteamId;
             _session.ConnectProblem += ShowError;
         }
 
@@ -87,6 +101,12 @@ namespace CookingSimMP
             // StartHost and Join already explain why they can't run while connected.
             if (_session.IsRunning)
             {
+                // v0.12: F10 while hosting through Steam opens the Steam overlay's invite list.
+                if (window == Window.Host && _session.IsHost && _session.Kind == TransportKind.Steam)
+                {
+                    SteamInvites.Instance?.OpenInviteDialog();
+                    return;
+                }
                 if (window == Window.Host)
                     _session.StartHost(_port.Value);
                 else
@@ -95,15 +115,38 @@ namespace CookingSimMP
             }
             _open = window;
             _error = null;
+            RefreshSteam();
             if (window == Window.Host)
                 _addresses = LocalAddresses();
             else
-            {
-                _joinText = _hostAddress.Value;
-                _focusField = true;
-            }
+                ResetJoinText();
             AnyOpen = true;
             BlockGameInput();
+        }
+
+        private bool Steam => _connection.Value == TransportKind.Steam;
+
+        private void RefreshSteam()
+        {
+            _steamProblem = SteamTransport.Unavailable();
+            _ownSteamId = SteamTransport.LocalSteamId();
+        }
+
+        // The join field starts with whatever was joined last on the selected tab.
+        private void ResetJoinText()
+        {
+            _joinText = Steam ? _hostSteamId.Value : _hostAddress.Value;
+            _error = null;
+            _focusField = true;
+        }
+
+        private void SwitchTo(TransportKind kind)
+        {
+            if (_connection.Value == kind)
+                return;
+            _connection.Value = kind;
+            if (_open == Window.Join)
+                ResetJoinText();
         }
 
         private void Close()
@@ -171,19 +214,55 @@ namespace CookingSimMP
 
         // ---------- Actions ----------
 
-        private void StartHosting()
+        private void StartHosting(bool invite = false)
         {
             Close();
-            _session.StartHost(_port.Value);
+            if (Steam)
+            {
+                _session.StartSteamHost();
+                if (invite)
+                    SteamInvites.Instance?.OpenInviteDialog();
+            }
+            else
+                _session.StartHost(_port.Value);
         }
 
         private void TryJoin()
         {
+            if (Steam)
+            {
+                if (_steamProblem != null)
+                {
+                    _error = _steamProblem;
+                    return;
+                }
+                if (!TryParseSteamId(_joinText, out ulong steamId, out _error))
+                    return;
+                _hostSteamId.Value = steamId.ToString();
+                Close();
+                _session.JoinSteam(steamId);
+                return;
+            }
             if (!TryParseAddress(_joinText, _port.Value, out string address, out int port, out _error))
                 return;
             _hostAddress.Value = _joinText.Trim();
             Close();
             _session.Join(address, port);
+        }
+
+        // Accepts a SteamID64 (17 digits, starting 7656), alone or inside a steamcommunity.com/profiles/... link.
+        internal static bool TryParseSteamId(string text, out ulong steamId, out string error)
+        {
+            steamId = 0;
+            error = null;
+            string trimmed = (text ?? "").Trim();
+            Match match = Regex.Match(trimmed, @"(?<!\d)7656\d{13}(?!\d)");
+            if (match.Success && ulong.TryParse(match.Value, out steamId))
+                return true;
+            error = trimmed.IndexOf("steamcommunity.com/id/", StringComparison.OrdinalIgnoreCase) >= 0
+                ? "That profile link uses a custom name. Ask the host for the 17-digit Steam ID shown in their F10 window."
+                : "Paste the host's Steam ID: the 17-digit number starting with 7656 shown in their F10 window.";
+            return false;
         }
 
         // Accepts "address" (configured port) or "address:port".
@@ -266,7 +345,7 @@ namespace CookingSimMP
                     e.Use();
                     if (_open == Window.Error)
                         Close();
-                    else if (_open == Window.Host && WorldSync.HostInKitchen)
+                    else if (_open == Window.Host && WorldSync.HostInKitchen && !(Steam && _steamProblem != null))
                         StartHosting();
                     else if (_open == Window.Host)
                         Close();
@@ -276,9 +355,9 @@ namespace CookingSimMP
                 }
             }
 
-            float height = _open == Window.Host ? 200f + 26f * Math.Max(1, _addresses.Count)
+            float height = _open == Window.Host ? (Steam ? 330f : 250f + 26f * Math.Max(1, _addresses.Count))
                 : _open == Window.Error ? 130f + _labelStyle.CalcHeight(new GUIContent(_errorText ?? ""), Width - 40f)
-                : 260f;
+                : 320f;
             var rect = new Rect(Screen.width / 2f - Width / 2f, Screen.height / 2f - height / 2f, Width, height);
             // Drawn twice so IMGUI's translucent box is dark enough to read over the kitchen.
             GUI.Box(rect, GUIContent.none, _windowStyle);
@@ -309,17 +388,47 @@ namespace CookingSimMP
                 return;
             }
             GUILayout.Label("Start hosting?", _labelStyle);
-            GUILayout.Label($"Others can join your game with one of these addresses and port {_port.Value}:", _labelStyle);
-            if (_addresses.Count == 0)
-                GUILayout.Label("   (no network adapters found)", _labelStyle);
-            foreach (string address in _addresses)
-                GUILayout.Label("   " + address, _labelStyle);
-            GUILayout.Label($"Over the internet, use your public IP. That needs UDP port {_port.Value} forwarded on your router.", _labelStyle);
+            DrawTabs();
+            bool canHost = true;
+            if (Steam)
+            {
+                if (_steamProblem != null)
+                {
+                    GUILayout.Label(_steamProblem, _labelStyle);
+                    canHost = false;
+                }
+                else
+                {
+                    GUILayout.Label("Friends join through Steam with your Steam ID. No VPN or port forwarding needed.", _labelStyle);
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("   " + _ownSteamId, _idStyle);
+                    if (GUILayout.Button(Time.realtimeSinceStartup - _copiedAt < 2f ? "Copied" : "Copy Steam ID", _buttonStyle, GUILayout.Width(170f)))
+                    {
+                        GUIUtility.systemCopyBuffer = _ownSteamId.ToString();
+                        _copiedAt = Time.realtimeSinceStartup;
+                    }
+                    GUILayout.EndHorizontal();
+                    GUILayout.Label("Send it to them, or use Host and invite. Steam friends can also click Join Game on you in their friends list.", _labelStyle);
+                }
+            }
+            else
+            {
+                GUILayout.Label($"Others can join your game with one of these addresses and port {_port.Value}:", _labelStyle);
+                if (_addresses.Count == 0)
+                    GUILayout.Label("   (no network adapters found)", _labelStyle);
+                foreach (string address in _addresses)
+                    GUILayout.Label("   " + address, _labelStyle);
+                GUILayout.Label($"Over the internet, use your public IP. That needs UDP port {_port.Value} forwarded on your router.", _labelStyle);
+            }
             GUILayout.FlexibleSpace();
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
+            GUI.enabled = canHost;
+            if (Steam && GUILayout.Button("Host and invite", _buttonStyle, GUILayout.Width(180f)))
+                StartHosting(invite: true);
             if (GUILayout.Button("Host", _buttonStyle, GUILayout.Width(120f)))
                 StartHosting();
+            GUI.enabled = true;
             if (GUILayout.Button("Cancel", _buttonStyle, GUILayout.Width(120f)))
                 Close();
             GUILayout.EndHorizontal();
@@ -337,9 +446,8 @@ namespace CookingSimMP
                 && GUILayout.Button("Try again", _buttonStyle, GUILayout.Width(120f)))
             {
                 _open = Window.Join;
-                _error = null;
-                _joinText = _hostAddress.Value;
-                _focusField = true;
+                RefreshSteam();
+                ResetJoinText();
             }
             if (GUILayout.Button("OK", _buttonStyle, GUILayout.Width(120f)))
                 Close();
@@ -349,9 +457,20 @@ namespace CookingSimMP
         private void DrawJoin()
         {
             GUILayout.Label("Join a game", _labelStyle);
-            GUILayout.Label($"You'll load into the host's kitchen. Host's IP address (add :port if it isn't {_port.Value}):", _labelStyle);
+            DrawTabs();
+            if (Steam)
+                GUILayout.Label(_steamProblem ?? "You'll load into the host's kitchen. Paste the host's Steam ID (shown in their F10 window):", _labelStyle);
+            else
+                GUILayout.Label($"You'll load into the host's kitchen. Host's IP address (add :port if it isn't {_port.Value}):", _labelStyle);
+            GUILayout.BeginHorizontal();
             GUI.SetNextControlName("csmp_join_ip");
-            _joinText = GUILayout.TextField(_joinText, 64, _fieldStyle);
+            _joinText = GUILayout.TextField(_joinText, 128, _fieldStyle);
+            if (Steam && GUILayout.Button("Paste", _buttonStyle, GUILayout.Width(90f)))
+            {
+                _joinText = (GUIUtility.systemCopyBuffer ?? "").Trim();
+                _error = null;
+            }
+            GUILayout.EndHorizontal();
             if (_focusField)
             {
                 GUI.FocusControl("csmp_join_ip");
@@ -369,6 +488,19 @@ namespace CookingSimMP
             GUILayout.EndHorizontal();
         }
 
+        // Steam | Direct IP. The choice is saved (Connection in the config).
+        private void DrawTabs()
+        {
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Toggle(Steam, "Steam", _buttonStyle, GUILayout.Width(150f)) && !Steam)
+                SwitchTo(TransportKind.Steam);
+            if (GUILayout.Toggle(!Steam, "Direct IP", _buttonStyle, GUILayout.Width(150f)) && Steam)
+                SwitchTo(TransportKind.Direct);
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+            GUILayout.Space(6f);
+        }
+
         private void InitStyles()
         {
             if (_windowStyle != null)
@@ -378,6 +510,7 @@ namespace CookingSimMP
             _labelStyle.normal.textColor = Color.white;
             _fieldStyle = new GUIStyle(GUI.skin.textField) { fontSize = 20 };
             _buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = 18, fixedHeight = 36f };
+            _idStyle = new GUIStyle(_labelStyle) { fontSize = 24, fontStyle = FontStyle.Bold, wordWrap = false };
         }
     }
 }

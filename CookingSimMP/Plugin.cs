@@ -11,10 +11,12 @@ namespace CookingSimMP
     {
         public const string PluginGuid = "cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.11.9";
+        public const string PluginVersion = "0.12.1";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
+        private ConfigEntry<TransportKind> _connection;
+        private ConfigEntry<string> _hostSteamId;
         private ConfigEntry<bool> _moreOrders;
         private NetSession _session;
         private PlayerSync _playerSync;
@@ -38,6 +40,7 @@ namespace CookingSimMP
         private CareerSync _careerSync;
         private KeepRunning _keepRunning;
         private ConnectWindows _connectWindows;
+        private SteamInvites _steamInvites;
         private int _marker;
 
         private void Awake()
@@ -45,10 +48,14 @@ namespace CookingSimMP
             // The game destroys plugin objects on scene load; this keeps Update() running.
             gameObject.hideFlags = HideFlags.HideAndDontSave;
 
+            _connection = Config.Bind("Network", "Connection", TransportKind.Steam,
+                "How players connect (v0.12). Steam: through Steam, using the host's Steam ID; no VPN or port forwarding. Direct: by IP address and UDP port (LAN, Tailscale, port forwarding, or two copies on one PC). The F10/F11 windows switch it and save the choice.");
+            _hostSteamId = Config.Bind("Network", "HostSteamId", "",
+                "Steam ID the F11 join window starts with on the Steam tab; it saves whatever you last joined.");
             _hostAddress = Config.Bind("Network", "HostAddress", "127.0.0.1",
-                "Address the F11 join window starts with; it saves whatever you last joined. 127.0.0.1 means this PC; use the host's VPN IP to play with a friend. Add :port to use a different port.");
+                "Direct IP only: address the F11 join window starts with; it saves whatever you last joined. 127.0.0.1 means this PC; use the host's VPN IP to play with a friend. Add :port to use a different port.");
             _port = Config.Bind("Network", "Port", 9050,
-                "UDP port the host listens on and the joiner connects to.");
+                "Direct IP only: UDP port the host listens on and the joiner connects to. Steam connections don't use it.");
             _moreOrders = Config.Bind("Gameplay", "MoreOrdersWithMorePlayers", true,
                 "Host only: with a second player, the kitchen takes 1.5x the orders at once (another 0.5x per extra player). Also a button in the host's pause menu.");
 
@@ -74,9 +81,10 @@ namespace CookingSimMP
             _clockSync = new ClockSync(_session, Logger);
             _careerSync = new CareerSync(_session, Logger);
             _keepRunning = new KeepRunning(_session, Logger);
-            _connectWindows = new ConnectWindows(_session, _hostAddress, _port);
+            _connectWindows = new ConnectWindows(_session, _hostAddress, _port, _connection, _hostSteamId);
+            _steamInvites = new SteamInvites(_session, Logger, _connection, _hostSteamId);
             Logger.LogInfo($"{PluginName} {PluginVersion} loaded (process {NetSession.ProcessId}). " +
-                           $"F10 = host on port {_port.Value} (from inside a kitchen), F11 = join from the main menu (asks for the address), F12 = disconnect, F9 (client) = cooking sync test, F8 = log marker.");
+                           $"F10 = host through Steam or Direct IP (from inside a kitchen), F11 = join from the main menu (Steam ID or address), F12 = disconnect, F9 (client) = cooking sync test, F8 = log marker.");
         }
 
         private void Update()
@@ -98,6 +106,7 @@ namespace CookingSimMP
             }
 
             _session.Poll();
+            Run("Steam invites", _steamInvites.Tick, Time.unscaledDeltaTime);
             // Unscaled so syncing keeps running while the game is paused.
             float dt = Time.unscaledDeltaTime;
             Run("World", _worldSync.Tick, dt);
@@ -138,7 +147,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnMarker(int peerId, MessageType type, LiteNetLib.NetPacketReader reader)
+        private void OnMarker(int peerId, MessageType type, LiteNetLib.Utils.NetDataReader reader)
         {
             if (type != MessageType.LogMarker)
                 return;

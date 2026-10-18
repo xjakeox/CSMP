@@ -182,7 +182,7 @@ namespace CookingSimMP
 
         // ---------- The other player's change ----------
 
-        private void OnTimerRequest(NetPacketReader reader)
+        private void OnTimerRequest(NetDataReader reader)
         {
             int netId = reader.GetInt();
             var mode = (TimerMode)reader.GetByte();
@@ -196,7 +196,7 @@ namespace CookingSimMP
             SendState(netId, timer, snapshot: false);
         }
 
-        private void OnTimerState(NetPacketReader reader)
+        private void OnTimerState(NetDataReader reader)
         {
             int netId = reader.GetInt();
             var mode = (TimerMode)reader.GetByte();
@@ -279,7 +279,7 @@ namespace CookingSimMP
 
         // ---------- Messages ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             try
             {

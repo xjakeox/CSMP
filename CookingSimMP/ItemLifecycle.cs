@@ -291,7 +291,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnItemRespawn(NetPacketReader reader)
+        private void OnItemRespawn(NetDataReader reader)
         {
             int netId = reader.GetInt();
             var kind = (SpawnKind)reader.GetByte();

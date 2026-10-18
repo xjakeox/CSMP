@@ -212,7 +212,7 @@ namespace CookingSimMP
         }
 
         // The other player's purchase settled in a container they're carrying: move our copy to the same spot in it.
-        private void OnRemoteSeated(NetPacketReader reader)
+        private void OnRemoteSeated(NetDataReader reader)
         {
             int netId = reader.GetInt();
             int holderId = reader.GetInt();
@@ -321,7 +321,7 @@ namespace CookingSimMP
                 OnLocalHandChanged(held, false);
         }
 
-        private void ApplyRegistry(NetPacketReader reader)
+        private void ApplyRegistry(NetDataReader reader)
         {
             string scene = reader.GetString(128);
             string localScene = SceneManager.GetActiveScene().name;
@@ -1165,7 +1165,7 @@ namespace CookingSimMP
 
         // ---------- Messages from the other player ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             switch (type)
             {
@@ -1222,7 +1222,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnRemoteSpawn(NetPacketReader reader)
+        private void OnRemoteSpawn(NetDataReader reader)
         {
             int netId = reader.GetInt();
             var kind = (SpawnKind)reader.GetByte();
@@ -1415,7 +1415,7 @@ namespace CookingSimMP
             _log.LogInfo($"Other player picked up {Describe(netId, m)}{carrying}.");
         }
 
-        private void OnRemotePose(NetPacketReader reader, bool end, bool contentRest = false)
+        private void OnRemotePose(NetDataReader reader, bool end, bool contentRest = false)
         {
             int netId = reader.GetInt();
             Vector3 position = GetVector(reader);

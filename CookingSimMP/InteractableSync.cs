@@ -407,7 +407,7 @@ namespace CookingSimMP
 
         // ---------- Receiving ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             switch (type)
             {
@@ -424,7 +424,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnRemoteChange(NetPacketReader reader)
+        private void OnRemoteChange(NetDataReader reader)
         {
             string scene = reader.GetString(MaxStringLength);
             string key = reader.GetString(MaxStringLength);
@@ -606,7 +606,7 @@ namespace CookingSimMP
             _session.SendToAll(DeliveryMethod.ReliableOrdered);
         }
 
-        private void ApplySnapshot(NetPacketReader reader)
+        private void ApplySnapshot(NetDataReader reader)
         {
             string scene = reader.GetString(MaxStringLength);
             string localScene = SceneManager.GetActiveScene().name;

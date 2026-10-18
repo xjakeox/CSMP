@@ -94,7 +94,7 @@ namespace CookingSimMP
             }
         }
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (type != MessageType.StackCount || !Active)
                 return;

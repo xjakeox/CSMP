@@ -143,7 +143,7 @@ namespace CookingSimMP
             return true;
         }
 
-        private void OnOrderRequest(NetPacketReader reader)
+        private void OnOrderRequest(NetDataReader reader)
         {
             int recipeId = reader.GetInt();
             float customEstimatedTime = reader.GetFloat();
@@ -472,7 +472,7 @@ namespace CookingSimMP
                 _items.ForgetServed(container);
         }
 
-        private void OnRemoteOrderEnded(NetPacketReader reader)
+        private void OnRemoteOrderEnded(NetDataReader reader)
         {
             int globalId = reader.GetInt();
             bool failed = reader.GetBool();
@@ -564,7 +564,7 @@ namespace CookingSimMP
 
         // ---------- Messages ----------
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             try
             {

@@ -233,7 +233,7 @@ namespace CookingSimMP
             public Dictionary<GoodnesType, bool> Met = new Dictionary<GoodnesType, bool>();
         }
 
-        private void OnMessage(int peerId, MessageType type, NetPacketReader reader)
+        private void OnMessage(int peerId, MessageType type, NetDataReader reader)
         {
             if (type != MessageType.CookState)
                 return;
