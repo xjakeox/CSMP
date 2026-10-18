@@ -152,7 +152,7 @@ namespace CookingSimMP
             {
                 _log.LogError($"Could not open UDP port {port}. Another copy may already be hosting on it.");
                 ConnectProblem?.Invoke("Couldn't start hosting",
-                    $"UDP port {port} is already in use. Another copy of the game (or another program) may already be hosting on it. Close it, or change the port in BepInEx\\config\\com.jake.cookingsimmp.cfg.", false);
+                    $"UDP port {port} is already in use. Another copy of the game (or another program) may already be hosting on it. Close it, or change the port in BepInEx\\config\\cookingsimmp.cfg.", false);
                 return;
             }
             _isHost = true;

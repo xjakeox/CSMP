@@ -9,9 +9,9 @@ namespace CookingSimMP
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     public class Plugin : BaseUnityPlugin
     {
-        public const string PluginGuid = "com.jake.cookingsimmp";
+        public const string PluginGuid = "cookingsimmp";
         public const string PluginName = "CookingSimMP";
-        public const string PluginVersion = "0.11.8";
+        public const string PluginVersion = "0.11.9";
 
         private ConfigEntry<string> _hostAddress;
         private ConfigEntry<int> _port;
