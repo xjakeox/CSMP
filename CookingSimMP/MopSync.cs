@@ -53,7 +53,7 @@ namespace CookingSimMP
             _items = items;
             _log = log;
             _session.MessageReceived += OnMessage;
-            _session.PeerLeft += _ => Reset();
+            _session.AllPeersLeft += Reset;   // v0.12.2: not when one of several clients leaves.
             _session.Stopped += Reset;
             _session.WorldReset += Reset;
             try

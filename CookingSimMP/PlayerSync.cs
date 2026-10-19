@@ -13,7 +13,6 @@ namespace CookingSimMP
         private readonly NetSession _session;
         private readonly ManualLogSource _log;
         private readonly Dictionary<int, RemotePlayerGhost> _ghosts = new Dictionary<int, RemotePlayerGhost>();
-        private readonly Dictionary<int, int> _slots = new Dictionary<int, int>();   // Host: peer -> colour slot.
         private float _sendTimer;
         private GUIStyle _tagStyle;
         private GUIStyle _tagShadowStyle;
@@ -24,6 +23,7 @@ namespace CookingSimMP
             _log = log;
             _session.PlayerStateReceived += OnPlayerStateReceived;
             _session.PeerLeft += RemoveGhost;
+            _session.OtherPlayerLeft += RemoveGhost;   // v0.12.2: another client, seen through the host.
             _session.Stopped += RemoveAllGhosts;
         }
 
@@ -132,24 +132,14 @@ namespace CookingSimMP
             ghost.SetTarget(state);
         }
 
-        // Colour slot (v0.11.2): 0 is the host (red). A client only ever sees the host. The host gives each client the
-        // lowest free slot from 1, so the first client is blue and the second green, in the order they joined.
-        private int SlotFor(int peerId)
-        {
-            if (!_session.IsHost)
-                return 0;
-            if (_slots.TryGetValue(peerId, out int existing))
-                return existing;
-            int slot = 1;
-            while (_slots.ContainsValue(slot))
-                slot++;
-            _slots[peerId] = slot;
-            return slot;
-        }
+        // Colour slot (v0.11.2): 0 is the host (red). The host gives each client the lowest free slot from 1, so the
+        // first client is blue and the second green, in the order they joined. v0.12.2: the host now hands out the slot
+        // when the client connects (NetSession) and tells every client the others' slots, so each chef has the same
+        // colour on every screen.
+        private int SlotFor(int peerId) => _session.SlotOf(peerId);
 
         private void RemoveGhost(int peerId)
         {
-            _slots.Remove(peerId);
             if (_ghosts.TryGetValue(peerId, out RemotePlayerGhost ghost))
             {
                 ghost.Destroy();
@@ -162,7 +152,6 @@ namespace CookingSimMP
             foreach (RemotePlayerGhost ghost in _ghosts.Values)
                 ghost.Destroy();
             _ghosts.Clear();
-            _slots.Clear();
         }
     }
 }

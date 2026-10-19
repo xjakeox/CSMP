@@ -66,6 +66,8 @@ namespace CookingSimMP
         PerkUsed = 54,         // Host -> client: a once-per-day perk was used (or its daily uses changed).
         PerkRequest = 55,      // Client -> host: "Use this perk on this order for me" (reroll, reset time, time boost).
         Bankrupt = 56,         // Host -> client: the restaurant went bankrupt; run the game's bankruptcy here too.
+        PlayerRelay = 57,      // Host -> client: another client's position, passed on with who it is (v0.12.2).
+        PlayerInfo = 58,       // Host -> client: another client joined (name, colour slot) or left (v0.12.2).
     }
 
 
@@ -90,6 +92,21 @@ namespace CookingSimMP
         // Each peer's Steam name from their hello (v0.11.3), for the name tag over their chef. Empty if they had none.
         private readonly Dictionary<int, string> _peerNames = new Dictionary<int, string>();
 
+        // v0.12.2: three or more players. Clients only connect to the host, so the host passes each client's actions
+        // and position on to the other clients (the relay). Without it, two clients never saw each other.
+        // Host: each client's player slot, given when it connects: 1 for the first, 2 for the second, the lowest free
+        // one after that. It picks the chef colour and the range the client's new item IDs come from.
+        private readonly Dictionary<int, int> _slots = new Dictionary<int, int>();
+        private readonly HashSet<int> _verifiedPeers = new HashSet<int>();   // Host: clients whose version matched.
+        private readonly NetDataWriter _relayWriter = new NetDataWriter();
+        private bool _relayCancelled;
+        // Client: this copy's slot (from the host's hello), and the other clients the host told us about. Another
+        // client shows up here under OtherPlayerBase + their peer ID on the host, so it never clashes with the host's.
+        private int _localSlot;
+        private readonly Dictionary<int, string> _otherNames = new Dictionary<int, string>();
+        private readonly Dictionary<int, int> _otherSlots = new Dictionary<int, int>();
+        private const int OtherPlayerBase = 1_000_000;
+
         public event Action<int, PlayerState> PlayerStateReceived;
         public event Action<int> PeerJoined;
         public event Action<int> PeerLeft;
@@ -107,6 +124,11 @@ namespace CookingSimMP
         public event Action<int, MessageType, NetDataReader> MessageReceived;
         // Client: the host left (closed the game, stopped hosting, timed out) after we were in. Not raised for F12.
         public event Action HostLost;
+        // The last peer left: the host has no clients left, or a client lost the host (v0.12.2). Syncs that forget
+        // everything when the other player leaves use this, so one client leaving doesn't reset the host for the rest.
+        public event Action AllPeersLeft;
+        // Client: another client (not the host) left the game; its ID is the one PlayerStateReceived used (v0.12.2).
+        public event Action<int> OtherPlayerLeft;
 
         public bool IsHost => _isHost;
 
@@ -117,12 +139,24 @@ namespace CookingSimMP
         // Steam or Direct; only meaningful while running.
         public TransportKind Kind => _transport?.Kind ?? TransportKind.Steam;
 
-        // Players connected to this copy (host: the clients; client: 1, the host).
+        // Players connected to this copy (host: the clients; client: 1, the host; other clients only reach a client through the host).
         public int PeerCount => _peers.Count;
 
         // The name to show over a peer's chef: their Steam name, or "Player" when they have none.
         public string PlayerNameOf(int peerId) =>
-            _peerNames.TryGetValue(peerId, out string name) && !string.IsNullOrEmpty(name) ? name : "Player";
+            (_peerNames.TryGetValue(peerId, out string name) || _otherNames.TryGetValue(peerId, out name)) && !string.IsNullOrEmpty(name)
+                ? name : "Player";
+
+        // This copy's player slot: 0 on the host, 1 and up on a client (v0.12.2).
+        public int LocalSlot => _isHost ? 0 : _localSlot;
+
+        // A player's slot (chef colour): the host is 0; clients are numbered by the host in the order they joined.
+        public int SlotOf(int peerId)
+        {
+            if (_isHost)
+                return _slots.TryGetValue(peerId, out int slot) ? slot : 1;
+            return _otherSlots.TryGetValue(peerId, out int other) ? other : 0;
+        }
 
         public NetSession(ManualLogSource log)
         {
@@ -253,6 +287,7 @@ namespace CookingSimMP
             _transport = null;
             _peers.Clear();
             _peerNames.Clear();
+            ClearRelayState();
             _log.LogInfo("Disconnected and stopped networking.");
             Stopped?.Invoke();
         }
@@ -267,6 +302,96 @@ namespace CookingSimMP
         {
             if (_peers.Contains(peerId))
                 _transport?.Send(peerId, _writer, deliveryMethod);
+        }
+
+        // ---------- Relay (v0.12.2) ----------
+
+        // Messages one player sends about their own actions, which mean the same coming from any player. The host
+        // passes these on from one client to the others. Everything else is either the host's alone (orders, money,
+        // cooking, the clock) and already goes to every client, or a request to the host that it answers itself.
+        private static bool IsRelayed(MessageType type)
+        {
+            switch (type)
+            {
+                case MessageType.HoldStart:
+                case MessageType.HoldPose:
+                case MessageType.HoldEnd:
+                case MessageType.ContentRest:
+                case MessageType.ItemSpawned:
+                case MessageType.ItemSeated:
+                case MessageType.ItemRemoved:
+                case MessageType.InteractChange:
+                case MessageType.CutDone:
+                case MessageType.ContentsState:
+                case MessageType.PaintStrokes:
+                case MessageType.LogMarker:
+                case MessageType.MopState:
+                case MessageType.OrderEnded:
+                case MessageType.ItemBroken:
+                case MessageType.StackCount:
+                case MessageType.RepairStart:
+                case MessageType.RepairStop:
+                case MessageType.PropBroken:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        // Called by a handler on the host while it handles a client's message: don't pass this one on (the host
+        // refused it, e.g. a grab of something another player already holds).
+        public void CancelRelay() => _relayCancelled = true;
+
+        private void Relay(int fromPeer, DeliveryMethod deliveryMethod)
+        {
+            foreach (int peerId in _peers)
+            {
+                if (peerId != fromPeer)
+                    _transport?.Send(peerId, _relayWriter, deliveryMethod);
+            }
+        }
+
+        // Host: tell the other clients about a client that joined or left, and tell a new client about the others.
+        private void SendPlayerInfo(int aboutPeer, bool present, int toPeer)
+        {
+            _relayWriter.Reset();
+            _relayWriter.Put((byte)MessageType.PlayerInfo);
+            _relayWriter.Put(aboutPeer);
+            _relayWriter.Put(present);
+            _relayWriter.Put(SlotOf(aboutPeer));
+            _relayWriter.Put(_peerNames.TryGetValue(aboutPeer, out string name) ? name ?? string.Empty : string.Empty);
+            _transport?.Send(toPeer, _relayWriter, DeliveryMethod.ReliableOrdered);
+        }
+
+        // Client: the host told us about another client.
+        private void OnPlayerInfo(NetDataReader reader)
+        {
+            int id = OtherPlayerBase + reader.GetInt();
+            bool present = reader.GetBool();
+            int slot = reader.GetInt();
+            string name = reader.GetString(64);
+            if (present)
+            {
+                _otherNames[id] = name;
+                _otherSlots[id] = slot;
+                _log.LogInfo($"{(string.IsNullOrEmpty(name) ? "Another player" : name)} is in this game too (colour slot {slot}).");
+                return;
+            }
+            if (!_otherSlots.Remove(id))
+                return;
+            _log.LogInfo($"{PlayerNameOf(id)} left the game.");
+            _otherNames.Remove(id);
+            OtherPlayerLeft?.Invoke(id);
+        }
+
+        private void ClearRelayState()
+        {
+            _slots.Clear();
+            _verifiedPeers.Clear();
+            foreach (int id in new List<int>(_otherSlots.Keys))
+                OtherPlayerLeft?.Invoke(id);
+            _otherNames.Clear();
+            _otherSlots.Clear();
         }
 
         public void Poll()
@@ -310,11 +435,20 @@ namespace CookingSimMP
         {
             _log.LogInfo($"Connected to peer {peerId} as {Role}. Sending hello.");
             _peers.Add(peerId);
+            if (_isHost)
+            {
+                int slot = 1;
+                while (_slots.ContainsValue(slot))
+                    slot++;
+                _slots[peerId] = slot;
+            }
             _writer.Reset();
             _writer.Put((byte)MessageType.Hello);
             _writer.Put($"hello from {Role} (process {ProcessId})");
             _writer.Put(Plugin.PluginVersion);
             _writer.Put(PauseSync.SteamName() ?? string.Empty);
+            // v0.12.2: the host tells the client its player slot.
+            _writer.Put(_isHost ? _slots[peerId] : 0);
             _transport.Send(peerId, _writer, DeliveryMethod.ReliableOrdered);
             PeerJoined?.Invoke(peerId);
         }
@@ -323,8 +457,20 @@ namespace CookingSimMP
         {
             _log.LogInfo($"Peer {peerId} disconnected: {reason} ({detail}).");
             _peers.Remove(peerId);
+            if (_isHost && _verifiedPeers.Remove(peerId))
+            {
+                foreach (int other in _verifiedPeers)
+                    SendPlayerInfo(peerId, false, other);
+            }
+            _slots.Remove(peerId);
             _peerNames.Remove(peerId);
             PeerLeft?.Invoke(peerId);
+            if (_peers.Count == 0)
+            {
+                if (!_isHost)
+                    ClearRelayState();
+                AllPeersLeft?.Invoke();
+            }
             // A client with no host left has nothing to do; stop so F10/F11 work again without F12.
             if (!_isHost)
             {
@@ -414,11 +560,45 @@ namespace CookingSimMP
                     OnHello(peerId, reader);
                     break;
                 case MessageType.PlayerState:
-                    PlayerStateReceived?.Invoke(peerId, PlayerState.Read(reader));
+                {
+                    PlayerState state = PlayerState.Read(reader);
+                    PlayerStateReceived?.Invoke(peerId, state);
+                    // v0.12.2: the other clients see this client's chef too.
+                    if (_isHost && _peers.Count > 1 && _verifiedPeers.Contains(peerId))
+                    {
+                        _relayWriter.Reset();
+                        _relayWriter.Put((byte)MessageType.PlayerRelay);
+                        _relayWriter.Put(peerId);
+                        state.Write(_relayWriter);
+                        Relay(peerId, DeliveryMethod.Sequenced);
+                    }
+                    break;
+                }
+                case MessageType.PlayerRelay:
+                {
+                    int id = OtherPlayerBase + reader.GetInt();
+                    PlayerState state = PlayerState.Read(reader);
+                    // Only once the host has said who it is, so the chef gets the right colour and name.
+                    if (!_isHost && _otherSlots.ContainsKey(id))
+                        PlayerStateReceived?.Invoke(id, state);
+                    break;
+                }
+                case MessageType.PlayerInfo:
+                    if (!_isHost)
+                        OnPlayerInfo(reader);
                     break;
                 default:
                     if (DropMessage != null && DropMessage(peerId, type))
                         break;
+                    // v0.12.2: keep a copy of a client's message to pass on to the other clients once it's handled.
+                    bool relay = _isHost && _peers.Count > 1 && IsRelayed(type);
+                    if (relay)
+                    {
+                        _relayWriter.Reset();
+                        _relayWriter.Put((byte)type);
+                        _relayWriter.Put(reader.RawData, reader.Position, reader.AvailableBytes);
+                    }
+                    _relayCancelled = false;
                     if (MessageReceived != null)
                     {
                         // Each sync on its own: one that throws mustn't stop the others, and the error has to reach
@@ -434,6 +614,9 @@ namespace CookingSimMP
                                 _log.LogError($"Handling {type} from peer {peerId} failed in {handler.Method.DeclaringType?.Name}: {e}");
                             }
                         }
+                        if (relay && !_relayCancelled)
+                            // Poses go out as they came in; a lost mop position does no harm sent reliably, and its "put down" must arrive.
+                            Relay(peerId, type == MessageType.HoldPose ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered);
                         break;
                     }
                     _log.LogWarning($"Unknown message type {(byte)type} from peer {peerId}.");
@@ -448,9 +631,23 @@ namespace CookingSimMP
             string theirs = reader.AvailableBytes > 0 ? reader.GetString(32) : "0.8.5 or older";
             // v0.11.3 and newer add the sender's Steam name.
             _peerNames[peerId] = reader.AvailableBytes > 0 ? reader.GetString(64) : string.Empty;
+            // v0.12.2 and newer: the host says which player slot this client is.
+            if (!_isHost && reader.AvailableBytes >= 4)
+                _localSlot = Math.Max(1, reader.GetInt());
             if (theirs == Plugin.PluginVersion)
             {
                 _verified = true;
+                if (_isHost)
+                {
+                    // v0.12.2: the clients already in and the new one learn about each other.
+                    foreach (int other in _verifiedPeers)
+                    {
+                        SendPlayerInfo(peerId, true, other);
+                        SendPlayerInfo(other, true, peerId);
+                    }
+                    _verifiedPeers.Add(peerId);
+                    _log.LogInfo($"{PlayerNameOf(peerId)} is player slot {SlotOf(peerId)}.");
+                }
                 PeerVerified?.Invoke(peerId);
                 return;
             }

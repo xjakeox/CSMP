@@ -191,6 +191,7 @@ namespace CookingSimMP
                 _toldWaitForDay = false;
                 var peers = new List<int>(_waiting);
                 _waiting.Clear();
+                AddPlayersAlreadyIn(peers);
                 SendWorld(peers);
             }
 
@@ -254,6 +255,29 @@ namespace CookingSimMP
                 }
             }
             _log.LogInfo($"[World] Sent the world ({bytes.Length / 1024} KB, kitchen {general?.kitchenId}, {general?.gameState}) to {string.Join(", ", _joining.Values)}.");
+        }
+
+        // v0.12.2: a player joins while others are already in. Sending the world makes the host number every item
+        // again (ItemSync), and the players already in kept their old numbers, so they reload the world with the new
+        // player, the way RESYNC does. Before, they stayed on the old numbers and their items no longer matched.
+        private void AddPlayersAlreadyIn(List<int> peers)
+        {
+            if (_resyncing)
+                return;
+            var joiners = new List<string>(NamesOf(peers));
+            foreach (int peerId in new List<int>(_names.Keys))
+            {
+                if (peers.Contains(peerId) || _joining.ContainsKey(peerId))
+                    continue;
+                peers.Add(peerId);
+                NetDataWriter writer = _session.BeginMessage(MessageType.WorldLeaving);
+                writer.Put(true);    // A reload of this kitchen...
+                writer.Put(false);   // ...not because the next day started...
+                writer.Put(string.Join(", ", joiners));   // ...but because these players are joining.
+                _session.SendTo(peerId, DeliveryMethod.ReliableOrdered);
+            }
+            if (peers.Count > joiners.Count)
+                _log.LogInfo($"[World] {string.Join(", ", joiners)} joining; the players already in reload the world with them.");
         }
 
         // The same save the game writes to disk (SaveLoadManager.Save), but kept in memory: no file, screenshot or save list entry.
@@ -599,7 +623,9 @@ namespace CookingSimMP
                         break;
                     bool resync = reader.AvailableBytes > 0 && reader.GetBool();
                     bool nextDay = reader.AvailableBytes > 0 && reader.GetBool();
-                    PauseSync.Instance?.Notify(nextDay ? "The host started the next day; loading it"
+                    string joining = reader.AvailableBytes > 0 ? reader.GetString(256) : null;
+                    PauseSync.Instance?.Notify(!string.IsNullOrEmpty(joining) ? $"{joining} is joining; reloading the host's world"
+                        : nextDay ? "The host started the next day; loading it"
                         : resync ? "The host is resyncing; reloading the host's world" : "The host is loading another kitchen; you'll follow", 6f);
                     break;
             }

@@ -62,6 +62,9 @@ namespace CookingSimMP
         private readonly Dictionary<IMovable, int> _netIdOf = new Dictionary<IMovable, int>();
         private readonly Dictionary<int, LocalTrack> _localTracks = new Dictionary<int, LocalTrack>();
         private readonly Dictionary<int, RemoteHeldItem> _remoteHeld = new Dictionary<int, RemoteHeldItem>();
+        // Host, v0.12.2: which client is moving each item in _remoteHeld, so a second client's grab of the same item is
+        // refused and not passed on, and an item a leaving client held is let go.
+        private readonly Dictionary<int, int> _heldBy = new Dictionary<int, int>();
         private readonly List<int> _scratchIds = new List<int>();
 
         private string _registryScene;       // Scene the current ID table belongs to.
@@ -73,7 +76,9 @@ namespace CookingSimMP
         private float _unknownSince;
         private float _sendTimer;
 
-        // Items created during play get IDs from separate ranges so the two copies never pick the same one.
+        // Items created during play get IDs from separate ranges so no two copies pick the same one: the host's from
+        // 1,000,000, the first client's from 2,000,000, the second client's from 3,000,000 and so on (v0.12.2; before,
+        // every client used 2,000,000 and two clients' items overwrote each other on the host).
         // (The host's starting table uses 0, 1, 2...)
         private int _nextLocalId;
 
@@ -130,7 +135,8 @@ namespace CookingSimMP
             PatchPick();
             PatchLifecycle();
             PatchEggs();
-            _session.PeerLeft += _ => Reset();
+            _session.AllPeersLeft += Reset;
+            _session.PeerLeft += OnPeerLeft;
             _session.Stopped += Reset;
             _session.WorldReset += Reset;
             // Stacks (plates, bowls, tools...) create the bought item and put it in the hand.
@@ -477,8 +483,8 @@ namespace CookingSimMP
 
         // ---------- Used by CutSync: cutting replaces one item with new pieces ----------
 
-        // A fresh ID from this copy's range, so the two copies never hand out the same one.
-        public int NewLocalId() => (_session.IsHost ? 1_000_000 : 2_000_000) + _nextLocalId++;
+        // A fresh ID from this copy's range (see _nextLocalId), so no two copies hand out the same one.
+        public int NewLocalId() => 1_000_000 * (1 + _session.LocalSlot) + _nextLocalId++;
 
         public void RegisterItem(int netId, IMovable movable)
         {
@@ -605,6 +611,7 @@ namespace CookingSimMP
                         ReleaseRemoteHeld(lost, snap: false);
                         _remoteHeld.Remove(netId);
                     }
+                    _heldBy.Remove(netId);
                     _session.BeginMessage(MessageType.HoldDenied).Put(netId);
                     _session.SendToAll(DeliveryMethod.ReliableOrdered);
                 }
@@ -1182,19 +1189,42 @@ namespace CookingSimMP
                 case MessageType.HoldStart:
                 {
                     int netId = reader.GetInt();
-                    _holderName[netId] = reader.GetString(64);
-                    OnRemoteHoldStart(netId);
+                    string holder = reader.GetString(64);
+                    // v0.12.2: another client already moves it here; this grab lost, so it isn't passed on.
+                    if (_session.IsHost && HeldByAnotherClient(netId, peerId))
+                    {
+                        _session.CancelRelay();
+                        _session.BeginMessage(MessageType.HoldDenied).Put(netId);
+                        _session.SendTo(peerId, DeliveryMethod.ReliableOrdered);
+                        break;
+                    }
+                    _holderName[netId] = holder;
+                    OnRemoteHoldStart(netId, peerId);
+                    if (_session.IsHost)
+                    {
+                        if (_remoteHeld.ContainsKey(netId))
+                            _heldBy[netId] = peerId;
+                        else if (TryGetItem(netId, out _))
+                            _session.CancelRelay();   // The host has it in hand and refused the grab.
+                    }
                     break;
                 }
                 case MessageType.HoldDenied:
                     OnHoldDenied(reader.GetInt());
                     break;
                 case MessageType.HoldPose:
-                    OnRemotePose(reader, end: false);
-                    break;
                 case MessageType.HoldEnd:
-                    OnRemotePose(reader, end: true);
+                {
+                    // v0.12.2: only the client the host let hold the item moves it for the others.
+                    if (_session.IsHost && reader.AvailableBytes >= 4)
+                    {
+                        int netId = reader.PeekInt();
+                        if (TryGetItem(netId, out _) && !(_remoteHeld.ContainsKey(netId) && _heldBy.TryGetValue(netId, out int holder) && holder == peerId))
+                            _session.CancelRelay();
+                    }
+                    OnRemotePose(reader, end: type == MessageType.HoldEnd);
                     break;
+                }
                 case MessageType.ContentRest:
                     OnRemotePose(reader, end: true, contentRest: true);
                     break;
@@ -1361,7 +1391,36 @@ namespace CookingSimMP
             _log.LogInfo($"Other player served plate {netId}; removed it here ({onPlate} items on it; {foodIds?.Count ?? 0} on theirs).");
         }
 
-        private void OnRemoteHoldStart(int netId)
+        // Host: true when a client other than this one is moving the item here.
+        private bool HeldByAnotherClient(int netId, int peerId) =>
+            _remoteHeld.ContainsKey(netId) && _heldBy.TryGetValue(netId, out int holder) && holder != peerId;
+
+        // Host, v0.12.2: one client left while others stay. What it was moving stops where it is; this copy takes
+        // it over and sends it until it comes to rest, so the clients still here let go of it too.
+        private void OnPeerLeft(int peerId)
+        {
+            if (!_session.IsHost || !_session.IsConnected)
+                return;
+            var left = new List<int>();
+            foreach (KeyValuePair<int, int> pair in _heldBy)
+            {
+                if (pair.Value == peerId)
+                    left.Add(pair.Key);
+            }
+            foreach (int netId in left)
+            {
+                _heldBy.Remove(netId);
+                if (!_remoteHeld.TryGetValue(netId, out RemoteHeldItem item))
+                    continue;
+                ReleaseRemoteHeld(item, snap: true);
+                _remoteHeld.Remove(netId);
+                if (IsAlive(item.Movable))
+                    SendUntilRest(netId, item.Movable);
+                _log.LogInfo($"The player who left was holding item {netId}; letting go of it here.");
+            }
+        }
+
+        private void OnRemoteHoldStart(int netId, int peerId)
         {
             if (!_byNetId.TryGetValue(netId, out IMovable m) || !IsAlive(m))
             {
@@ -1378,7 +1437,7 @@ namespace CookingSimMP
                 {
                     // The host wins: keep it, and tell the client to let go.
                     _session.BeginMessage(MessageType.HoldDenied).Put(netId);
-                    _session.SendToAll(DeliveryMethod.ReliableOrdered);
+                    _session.SendTo(peerId, DeliveryMethod.ReliableOrdered);
                     return;
                 }
                 YieldToHost(netId, m);
@@ -1637,6 +1696,7 @@ namespace CookingSimMP
             foreach (RemoteHeldItem item in _remoteHeld.Values)
                 ReleaseRemoteHeld(item, snap: false);
             _remoteHeld.Clear();
+            _heldBy.Clear();
             _frozen.Clear();
             _pausedJoints.Clear();
         }
