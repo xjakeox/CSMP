@@ -1446,6 +1446,11 @@ namespace CookingSimMP
             _localTracks.Remove(netId);
             // v0.11.4: taken out of a container they carry; that container stops moving it here.
             UnpinFromCarriers(m);
+            // v0.12.4: take it out of the container it sat in here, as the game does when you pick something up.
+            // We move it with collisions off, so the container's trigger never sees it leave; it stayed listed as
+            // contents and was carried along with the container (a cut half moved off a board hovered beside it).
+            if (m.AttachedMovable is Container holder && IsAlive(holder) && !ReferenceEquals(holder, m))
+                holder.MovableDetached(m);
 
             Transform main = PoseTransformOf(m);
             Rigidbody mainBody = MainBodyOf(m);

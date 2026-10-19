@@ -31,7 +31,9 @@ namespace CookingSimMP
     {
         private const int ChunkSize = 32 * 1024;
         private const float JoinTimeout = 120f;
-        private const string JoinFileName = "csmp_join";
+        // v0.12.3: one file per running copy. With several copies on one PC (testing), they all share BepInEx\cache,
+        // and two clients reloading at once wrote the same file while the other was reading it.
+        private static readonly string JoinFileName = $"csmp_join_{NetSession.ProcessId}";
 
         internal static WorldSync Instance;
 
@@ -479,20 +481,59 @@ namespace CookingSimMP
         private void StartLoad()
         {
             string path = Path.Combine(Paths.CachePath, JoinFileName);
+            DeleteOldJoinFiles();
             try
             {
                 File.WriteAllBytes(path + Game.SaveLoadManager.SaveFileExtension, _incoming);
             }
             catch (Exception e)
             {
-                _log.LogError($"[World] Couldn't write the host's world to {path}: {e.Message}");
-                Loading = false;
+                LoadFailed($"Couldn't write the host's world to {path}: {e.Message}");
                 return;
             }
             _incoming = null;
             _ourLoad = true;
             _loadTimer = 0f;
-            Singleton<GameManager>.Me.LoadGame(path, false);
+            try
+            {
+                Singleton<GameManager>.Me.LoadGame(path, false);
+            }
+            catch (Exception e)
+            {
+                LoadFailed($"The game couldn't load the host's world: {e.GetType().Name}: {e.Message}", e);
+            }
+        }
+
+        // Each copy's world file stays in the cache after it closes (the name has its process ID); clear out ones
+        // more than a day old, and the single file older versions used.
+        private void DeleteOldJoinFiles()
+        {
+            try
+            {
+                foreach (string file in Directory.GetFiles(Paths.CachePath, "csmp_join*"))
+                {
+                    if (Path.GetFileNameWithoutExtension(file) != JoinFileName && File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddDays(-1))
+                        File.Delete(file);
+                }
+            }
+            catch (Exception e)
+            {
+                _log.LogInfo($"[World] Couldn't clear old world files from the cache: {e.Message}");
+            }
+        }
+
+        // v0.12.3: loading the host's world failed. Before, this copy stayed "loading" (ignoring the host) and the host
+        // stayed paused until its 2-minute join timeout. Now the host hears about it at once and resumes, and this copy
+        // disconnects with the reason on screen, so the player can join again.
+        private void LoadFailed(string reason, Exception e = null)
+        {
+            _log.LogError($"[World] {reason}" + (e != null ? $"\n{e}" : ""));
+            _ourLoad = false;
+            Loading = false;
+            _session.ReportProblem("Couldn't load the host's world", reason + " Join again with F11.", true);
+            _session.BeginMessage(MessageType.WorldRefused).Put("their game couldn't load the world");
+            _session.SendToAll(DeliveryMethod.ReliableOrdered);
+            _session.StopAfterPoll();
         }
 
         private void OnLoadSceneComplete()
